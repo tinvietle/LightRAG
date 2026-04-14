@@ -9,65 +9,87 @@ PROMPTS["DEFAULT_TUPLE_DELIMITER"] = "<|#|>"
 PROMPTS["DEFAULT_COMPLETION_DELIMITER"] = "<|COMPLETE|>"
 
 PROMPTS["entity_extraction_system_prompt"] = """---Role---
-You are a Knowledge Graph Specialist responsible for extracting entities and relationships from the input text.
+You are a Clinical Data Specialist responsible for extracting high-signal, clinically meaningful entities and relationships from medical case notes to build a Knowledge Graph optimized for tropical disease prediction and diagnostic reasoning.
 
 ---Instructions---
 1.  **Entity Extraction & Output:**
-    *   **Identification:** Identify clearly defined and meaningful entities in the input text.
+    *   **Predictive Relevance Filter**: Identify ONLY entities that directly influence a clinical diagnosis or predict patient outcomes. Focus strictly on diseases, symptoms, clinical signs, laboratory results, pathogens, and pre-existing risk factors. You must IGNORE procedural logistics (e.g., "patient was transferred"), medical equipment (e.g., "18G needle", "face mask"), routine hygiene (e.g., "sterile gloves"), and incidental hospital administration details.
+    *   **Identification:** Identify clearly defined and clinically meaningful entities in the input text.
     *   **Entity Details:** For each identified entity, extract the following information:
-        *   `entity_name`: The name of the entity. If the entity name is case-insensitive, capitalize the first letter of each significant word (title case). Ensure **consistent naming** across the entire extraction process.
-        *   `entity_type`: Categorize the entity using one of the following types: `{entity_types}`. If none of the provided entity types apply, do not add new entity type and classify it as `Other`.
-        *   `entity_description`: Provide a concise yet comprehensive description of the entity's attributes and activities, based *solely* on the information present in the input text.
+        *   `entity_name`: The exact text span of the entity as it appears in the input text. Do **not** normalize, rephrase, expand abbreviations, or change capitalization. Preserve the original surface form exactly.
+        *   `entity_type`: Categorize the entity using one of the following types: `{entity_types}`. If none of the provided types apply, classify it as `Other`.
+        *   `entity_description`: Provide a concise yet comprehensive clinical description of the entity's attributes, clinical significance, and role within the case, based *solely* on the information present in the input text. Include relevant clinical details such as severity, stage, onset, laterality, or dosage where applicable.
     *   **Output Format - Entities:** Output a total of 4 fields for each entity, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `entity`.
         *   Format: `entity{tuple_delimiter}entity_name{tuple_delimiter}entity_type{tuple_delimiter}entity_description`
 
 2.  **Relationship Extraction & Output:**
-    *   **Identification:** Identify direct, clearly stated, and meaningful relationships between previously extracted entities.
-    *   **N-ary Relationship Decomposition:** If a single statement describes a relationship involving more than two entities (an N-ary relationship), decompose it into multiple binary (two-entity) relationship pairs for separate description.
-        *   **Example:** For "Alice, Bob, and Carol collaborated on Project X," extract binary relationships such as "Alice collaborated with Project X," "Bob collaborated with Project X," and "Carol collaborated with Project X," or "Alice collaborated with Bob," based on the most reasonable binary interpretations.
+  *   **Identification:** Identify direct, clearly stated, and clinically meaningful relationships between previously extracted entities (e.g., a disease is characterized by a symptom, a drug treats a condition, a lab finding indicates a pathophysiological process).
+    *   **N-ary Relationship Decomposition:** If a single clinical statement describes a relationship involving more than two entities (e.g., "metformin and sitagliptin were both prescribed for Type 2 Diabetes Mellitus"), decompose it into multiple binary relationship pairs (e.g., "Metformin treats Type 2 Diabetes Mellitus" and "Sitagliptin treats Type 2 Diabetes Mellitus").
     *   **Relationship Details:** For each binary relationship, extract the following fields:
-        *   `source_entity`: The name of the source entity. Ensure **consistent naming** with entity extraction. Capitalize the first letter of each significant word (title case) if the name is case-insensitive.
-        *   `target_entity`: The name of the target entity. Ensure **consistent naming** with entity extraction. Capitalize the first letter of each significant word (title case) if the name is case-insensitive.
-        *   `relationship_keywords`: One or more high-level keywords summarizing the overarching nature, concepts, or themes of the relationship. Multiple keywords within this field must be separated by a comma `,`. **DO NOT use `{tuple_delimiter}` for separating multiple keywords within this field.**
-        *   `relationship_description`: A concise explanation of the nature of the relationship between the source and target entities, providing a clear rationale for their connection.
+        *   `source_entity`: The exact text span of the source entity as it appears in the input text, and it must exactly match an extracted `entity_name`.
+        *   `target_entity`: The exact text span of the target entity as it appears in the input text, and it must exactly match an extracted `entity_name`.
+        *   `relationship_keywords`: One high-level clinical keyword summarizing the nature or theme of the relationship. You must choose EXACTLY ONE relation from the following keywords: `causes`, `complicates`, `treats`, `indicates`, `characterized_by`, `risk_factor_for`, `complication_of`, `contraindicated_with`, `associated_with`, `monitored_by`, `influences`, `identified_by`, `confirms`, `equivalent_to`. Do not invent or use any relationship keywords outside of this provided list.
+        *   `relationship_description`: A concise clinical explanation of the nature of the relationship between the source and target entities, providing clear clinical rationale for their connection.
     *   **Output Format - Relationships:** Output a total of 5 fields for each relationship, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `relation`.
         *   Format: `relation{tuple_delimiter}source_entity{tuple_delimiter}target_entity{tuple_delimiter}relationship_keywords{tuple_delimiter}relationship_description`
 
 3.  **Delimiter Usage Protocol:**
     *   The `{tuple_delimiter}` is a complete, atomic marker and **must not be filled with content**. It serves strictly as a field separator.
-    *   **Incorrect Example:** `entity{tuple_delimiter}Tokyo<|location|>Tokyo is the capital of Japan.`
-    *   **Correct Example:** `entity{tuple_delimiter}Tokyo{tuple_delimiter}location{tuple_delimiter}Tokyo is the capital of Japan.`
+    *   **Incorrect Example:** `entity{tuple_delimiter}Metformin<|drug|>Metformin is an oral anti-diabetic agent.`
+    *   **Correct Example:** `entity{tuple_delimiter}Metformin{tuple_delimiter}drug{tuple_delimiter}Metformin is an oral biguanide anti-diabetic agent used as first-line therapy for Type 2 Diabetes Mellitus.`
 
-4.  **Relationship Direction & Duplication:**
-    *   Treat all relationships as **undirected** unless explicitly stated otherwise. Swapping the source and target entities for an undirected relationship does not constitute a new relationship.
-    *   Avoid outputting duplicate relationships.
+  4.  **Exact-Match Entity Naming Rule:**
+    *   Every `entity_name`, `source_entity`, and `target_entity` must be copied from the input text exactly as written.
+    *   If the same concept appears in multiple surface forms (e.g., abbreviation vs full name), treat each distinct surface form as a separate entity unless the text explicitly equates them.
+    
+  5. *   **Qualifier Handling**: Clinical modifiers should NOT be embedded in entity names. Instead:
+    - If the modifier is a standalone concept (e.g., "recurrent", "acute"), extract it as a separate `Qualifier` entity and link via `characterized_by`.
+    - If it's descriptive only, include it in `entity_description` or `relationship_description`.
+    
+    Example: 
+    Input: "recurrent right-sided pleural effusions"
+    - Extract entities: "pleural effusions" (ClinicalFinding), "recurrent" (Qualifier), "right-sided" (Qualifier)
+    - Relations: (pleural effusions)--[characterized_by]-->(recurrent), (pleural effusions)--[characterized_by]-->(right-sided)
 
-5.  **Output Order & Prioritization:**
+  6.  **Relationship Direction & Duplication:**
+    *   Always extract relationships in the **clinical causal/logical direction**, not the grammatical direction. For example, if the text states "Metformin was prescribed for Type 2 Diabetes Mellitus", extract the relationship as `Metformin treats Type 2 Diabetes Mellitus`, not the reverse.
+    *   Predicate Direction Reference: 
+        - `causes`, `complicates`, `treats`, `risk_factor_for`, `indicates`, `confirms`, `influences`: Extract exactly as written. Source = clinical cause/agent. Target = effect/outcome.
+        - `complication_of`, `characterized_by`, `monitored_by`, `identified_by`: *Normalize to active form* by flipping direction. Example: `"pleural effusion complication_of LVHF"` → source: `left ventricular heart failure`, predicate: `complicates`, target: `pleural effusion`.
+        - `associated_with`, `contraindicated_with`: Bidirectional; Use standard clinical convention: `Drug → Condition` or `Risk Factor → Disease`.
+        - `equivalent_to`: Symmetric; output in any order but be consistent across all equivalent pairs.
+
+  7.  **Output Order & Prioritization:**
     *   Output all extracted entities first, followed by all extracted relationships.
-    *   Within the list of relationships, prioritize and output those relationships that are **most significant** to the core meaning of the input text first.
+    *   Within relationships, prioritize and output those most clinically significant to the case first (e.g., primary diagnosis–treatment relationships before incidental findings).
 
-6.  **Context & Objectivity:**
-    *   Ensure all entity names and descriptions are written in the **third person**.
-    *   Explicitly name the subject or object; **avoid using pronouns** such as `this article`, `this paper`, `our company`, `I`, `you`, and `he/she`.
+  8.  **Context & Objectivity:**
+    *   Ensure all entity names and descriptions are written in the **third person**, using objective clinical language.
+    *   Explicitly name the subject; **avoid using pronouns** or vague references such as "the patient", "this drug", or "our findings" without naming the entity.
+    *   Do not infer or fabricate clinical information not explicitly stated in the input text.
+    *   Only extract relationships that are explicitly stated or clearly supported by the text.
 
-7.  **Language & Proper Nouns:**
+  9.  **Language & Proper Nouns:**
     *   The entire output (entity names, keywords, and descriptions) must be written in `{language}`.
-    *   Proper nouns (e.g., personal names, place names, organization names) should be retained in their original language if a proper, widely accepted translation is not available or would cause ambiguity.
+    *   Standard medical Latin/Greek terms (e.g., drug generic names, anatomical terms) should be retained in their accepted international form even if the output language differs.
 
-8.  **Completion Signal:** Output the literal string `{completion_delimiter}` only after all entities and relationships, following all criteria, have been completely extracted and outputted.
+  10.  **Completion Signal:** Output the literal string `{completion_delimiter}` only after all entities and relationships, following all criteria, have been completely extracted and outputted.
+
+11.  **Instruction Priority:** If any example appears to conflict with these instructions, follow these instructions, especially the exact-match entity naming rule.
 
 ---Examples---
 {examples}
 """
 
 PROMPTS["entity_extraction_user_prompt"] = """---Task---
-Extract entities and relationships from the input text in Data to be Processed below.
+Extract clinically meaningful entities and relationships from the clinical case text in Data to be Processed below.
 
 ---Instructions---
-1.  **Strict Adherence to Format:** Strictly adhere to all format requirements for entity and relationship lists, including output order, field delimiters, and proper noun handling, as specified in the system prompt.
+1.  **Strict Adherence to Format:** Strictly adhere to all format requirements for entity and relationship lists, including output order, field delimiters, and exact-match entity naming rules, as specified in the system prompt.
 2.  **Output Content Only:** Output *only* the extracted list of entities and relationships. Do not include any introductory or concluding remarks, explanations, or additional text before or after the list.
 3.  **Completion Signal:** Output `{completion_delimiter}` as the final line after all relevant entities and relationships have been extracted and presented.
-4.  **Output Language:** Ensure the output language is {language}. Proper nouns (e.g., personal names, place names, organization names) must be kept in their original language and not translated.
+4.  **Output Language:** Ensure the output language is {language}.
+5.  **Exact-Match Extraction:** For `entity_name`, `source_entity`, and `target_entity`, copy the exact text span from the input text. Do not normalize to canonical terminology.
 
 ---Data to be Processed---
 <Entity_types>
@@ -82,128 +104,144 @@ Extract entities and relationships from the input text in Data to be Processed b
 """
 
 PROMPTS["entity_continue_extraction_user_prompt"] = """---Task---
-Based on the last extraction task, identify and extract any **missed or incorrectly formatted** entities and relationships from the input text.
+Based on the last extraction task, identify and extract any **missed or incorrectly formatted** clinically meaningful entities and relationships from the input text.
 
 ---Instructions---
-1.  **Strict Adherence to System Format:** Strictly adhere to all format requirements for entity and relationship lists, including output order, field delimiters, and proper noun handling, as specified in the system instructions.
+1.  **Strict Adherence to System Format:** Strictly adhere to all format requirements for entity and relationship lists, including output order, field delimiters, and exact-match entity naming rules, as specified in the system instructions.
 2.  **Focus on Corrections/Additions:**
     *   **Do NOT** re-output entities and relationships that were **correctly and fully** extracted in the last task.
-    *   If an entity or relationship was **missed** in the last task, extract and output it now according to the system format.
+    *   If a clinically significant entity or relationship was **missed** in the last task, extract and output it now according to the system format.
     *   If an entity or relationship was **truncated, had missing fields, or was otherwise incorrectly formatted** in the last task, re-output the *corrected and complete* version in the specified format.
 3.  **Output Format - Entities:** Output a total of 4 fields for each entity, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `entity`.
 4.  **Output Format - Relationships:** Output a total of 5 fields for each relationship, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `relation`.
 5.  **Output Content Only:** Output *only* the extracted list of entities and relationships. Do not include any introductory or concluding remarks, explanations, or additional text before or after the list.
 6.  **Completion Signal:** Output `{completion_delimiter}` as the final line after all relevant missing or corrected entities and relationships have been extracted and presented.
-7.  **Output Language:** Ensure the output language is {language}. Proper nouns (e.g., personal names, place names, organization names) must be kept in their original language and not translated.
+7.  **Output Language:** Ensure the output language is {language}.
+8.  **Exact-Match Extraction:** For corrected or added entities/relations, ensure `entity_name`, `source_entity`, and `target_entity` are exact text matches from the input text.
 
 <Output>
 """
 
 PROMPTS["entity_extraction_examples"] = [
     """<Entity_types>
-["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject"]
+["Disease", "Symptom", "Drug", "Procedure", "LabTest", "LabFinding", "Anatomy", "Pathogen", "RiskFactor", "ClinicalSign", "Allergy", "Complication", "MedicalDevice", "Specialty", "Other"]
 
 <Input Text>
 ```
-while Alex clenched his jaw, the buzz of frustration dull against the backdrop of Taylor's authoritarian certainty. It was this competitive undercurrent that kept him alert, the sense that his and Jordan's shared commitment to discovery was an unspoken rebellion against Cruz's narrowing vision of control and order.
-
-Then Taylor did something unexpected. They paused beside Jordan and, for a moment, observed the device with something akin to reverence. "If this tech can be understood..." Taylor said, their voice quieter, "It could change the game for us. For all of us."
-
-The underlying dismissal earlier seemed to falter, replaced by a glimpse of reluctant respect for the gravity of what lay in their hands. Jordan looked up, and for a fleeting heartbeat, their eyes locked with Taylor's, a wordless clash of wills softening into an uneasy truce.
-
-It was a small transformation, barely perceptible, but one that Alex noted with an inward nod. They had all been brought here by different paths
+A 58-year-old male with a 15-year history of Type 2 Diabetes Mellitus and hypertension presented to the emergency department with a 3-day history of progressive dyspnea, orthopnea, and bilateral leg swelling. On examination, he was found to have elevated jugular venous pressure, bilateral basal crepitations, and pitting edema to the knees. His BNP level was 1,850 pg/mL. Echocardiography revealed an ejection fraction of 30%. He was diagnosed with acute decompensated heart failure. He was started on intravenous furosemide and his home metformin was withheld due to risk of lactic acidosis.
 ```
 
 <Output>
-entity{tuple_delimiter}Alex{tuple_delimiter}person{tuple_delimiter}Alex is a character who experiences frustration and is observant of the dynamics among other characters.
-entity{tuple_delimiter}Taylor{tuple_delimiter}person{tuple_delimiter}Taylor is portrayed with authoritarian certainty and shows a moment of reverence towards a device, indicating a change in perspective.
-entity{tuple_delimiter}Jordan{tuple_delimiter}person{tuple_delimiter}Jordan shares a commitment to discovery and has a significant interaction with Taylor regarding a device.
-entity{tuple_delimiter}Cruz{tuple_delimiter}person{tuple_delimiter}Cruz is associated with a vision of control and order, influencing the dynamics among other characters.
-entity{tuple_delimiter}The Device{tuple_delimiter}equipment{tuple_delimiter}The Device is central to the story, with potential game-changing implications, and is revered by Taylor.
-relation{tuple_delimiter}Alex{tuple_delimiter}Taylor{tuple_delimiter}power dynamics, observation{tuple_delimiter}Alex observes Taylor's authoritarian behavior and notes changes in Taylor's attitude toward the device.
-relation{tuple_delimiter}Alex{tuple_delimiter}Jordan{tuple_delimiter}shared goals, rebellion{tuple_delimiter}Alex and Jordan share a commitment to discovery, which contrasts with Cruz's vision.)
-relation{tuple_delimiter}Taylor{tuple_delimiter}Jordan{tuple_delimiter}conflict resolution, mutual respect{tuple_delimiter}Taylor and Jordan interact directly regarding the device, leading to a moment of mutual respect and an uneasy truce.
-relation{tuple_delimiter}Jordan{tuple_delimiter}Cruz{tuple_delimiter}ideological conflict, rebellion{tuple_delimiter}Jordan's commitment to discovery is in rebellion against Cruz's vision of control and order.
-relation{tuple_delimiter}Taylor{tuple_delimiter}The Device{tuple_delimiter}reverence, technological significance{tuple_delimiter}Taylor shows reverence towards the device, indicating its importance and potential impact.
+entity{tuple_delimiter}Type 2 Diabetes Mellitus{tuple_delimiter}Disease{tuple_delimiter}Type 2 Diabetes Mellitus is a chronic metabolic disorder present in this patient for 15 years, characterized by insulin resistance and relative insulin deficiency.
+entity{tuple_delimiter}Hypertension{tuple_delimiter}Disease{tuple_delimiter}Hypertension is a chronic condition present in this patient, representing a known risk factor for heart failure and cardiovascular disease.
+entity{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}Disease{tuple_delimiter}Acute Decompensated Heart Failure is the primary diagnosis in this case, presenting with progressive dyspnea, orthopnea, bilateral leg edema, elevated BNP, and reduced ejection fraction of 30%.
+entity{tuple_delimiter}Dyspnea{tuple_delimiter}Symptom{tuple_delimiter}Dyspnea is a cardinal symptom of acute decompensated heart failure, progressive over 3 days in this patient.
+entity{tuple_delimiter}Orthopnea{tuple_delimiter}Symptom{tuple_delimiter}Orthopnea is shortness of breath when lying flat, present in this patient and consistent with elevated left atrial filling pressure in heart failure.
+entity{tuple_delimiter}Bilateral Leg Swelling{tuple_delimiter}Symptom{tuple_delimiter}Bilateral leg swelling is a symptom of fluid overload and right-sided heart failure, present over 3 days in this patient.
+entity{tuple_delimiter}Elevated Jugular Venous Pressure{tuple_delimiter}ClinicalSign{tuple_delimiter}Elevated jugular venous pressure is a clinical sign of elevated right-sided filling pressures, identified on examination and consistent with heart failure.
+entity{tuple_delimiter}Bilateral Basal Crepitations{tuple_delimiter}ClinicalSign{tuple_delimiter}Bilateral basal crepitations are lung auscultation findings indicating pulmonary edema, consistent with acute decompensated heart failure.
+entity{tuple_delimiter}Pitting Edema{tuple_delimiter}ClinicalSign{tuple_delimiter}Pitting edema to the knees is a clinical sign of significant peripheral fluid retention, present in this patient with acute decompensated heart failure.
+entity{tuple_delimiter}BNP{tuple_delimiter}LabTest{tuple_delimiter}B-type Natriuretic Peptide (BNP) is a cardiac biomarker used to assess degree of ventricular wall stress; this patient's level was markedly elevated at 1,850 pg/mL.
+entity{tuple_delimiter}BNP 1850 pg/mL{tuple_delimiter}LabFinding{tuple_delimiter}BNP level of 1,850 pg/mL is markedly elevated, strongly supporting the diagnosis of acute decompensated heart failure.
+entity{tuple_delimiter}Echocardiography{tuple_delimiter}Procedure{tuple_delimiter}Echocardiography is a cardiac imaging procedure performed in this patient, revealing a reduced ejection fraction of 30%.
+entity{tuple_delimiter}Ejection Fraction 30%{tuple_delimiter}LabFinding{tuple_delimiter}An ejection fraction of 30% indicates severely reduced left ventricular systolic function, consistent with heart failure with reduced ejection fraction (HFrEF).
+entity{tuple_delimiter}Furosemide{tuple_delimiter}Drug{tuple_delimiter}Furosemide is a loop diuretic administered intravenously to promote diuresis and reduce fluid overload in this patient with acute decompensated heart failure.
+entity{tuple_delimiter}Metformin{tuple_delimiter}Drug{tuple_delimiter}Metformin is an oral biguanide anti-diabetic agent used for Type 2 Diabetes Mellitus that was withheld in this patient due to the risk of lactic acidosis in the setting of acute heart failure.
+entity{tuple_delimiter}Lactic Acidosis{tuple_delimiter}Complication{tuple_delimiter}Lactic acidosis is a serious metabolic complication associated with metformin use in states of hemodynamic compromise, prompting its withholding in this patient.
+relation{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}Dyspnea{tuple_delimiter}characterized_by{tuple_delimiter}Dyspnea is a primary presenting symptom of acute decompensated heart failure in this patient.
+relation{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}Orthopnea{tuple_delimiter}characterized_by{tuple_delimiter}Orthopnea reflects elevated pulmonary venous pressures in acute decompensated heart failure.
+relation{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}Bilateral Leg Swelling{tuple_delimiter}characterized_by{tuple_delimiter}Bilateral leg swelling reflects systemic venous congestion due to right-sided heart failure.
+relation{tuple_delimiter}BNP 1850 pg/mL{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}indicates{tuple_delimiter}The markedly elevated BNP level directly supports the diagnosis of acute decompensated heart failure.
+relation{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}Ejection Fraction 30%{tuple_delimiter}characterized_by{tuple_delimiter}An ejection fraction of 30% establishes heart failure with reduced ejection fraction in this patient.
+relation{tuple_delimiter}Furosemide{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}treats{tuple_delimiter}Intravenous furosemide was administered to relieve fluid overload in acute decompensated heart failure.
+relation{tuple_delimiter}Metformin{tuple_delimiter}Lactic Acidosis{tuple_delimiter}risk_factor_for{tuple_delimiter}Metformin carries a risk of lactic acidosis, particularly in hemodynamically compromised states such as acute heart failure.
+relation{tuple_delimiter}Metformin{tuple_delimiter}Type 2 Diabetes Mellitus{tuple_delimiter}treats{tuple_delimiter}Metformin is a standard first-line oral agent for Type 2 Diabetes Mellitus but was withheld due to the current acute illness.
+relation{tuple_delimiter}Hypertension{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}risk_factor_for{tuple_delimiter}Long-standing hypertension is a major risk factor for the development of heart failure.
+relation{tuple_delimiter}Type 2 Diabetes Mellitus{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}risk_factor_for{tuple_delimiter}Type 2 Diabetes Mellitus is an established risk factor for cardiovascular disease including heart failure.
 {completion_delimiter}
 
 """,
     """<Entity_types>
-["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject"]
+["Disease", "Symptom", "Drug", "Procedure", "LabTest", "LabFinding", "Anatomy", "Pathogen", "RiskFactor", "ClinicalSign", "Allergy", "Complication", "MedicalDevice", "Specialty", "Other"]
 
 <Input Text>
 ```
-Stock markets faced a sharp downturn today as tech giants saw significant declines, with the global tech index dropping by 3.4% in midday trading. Analysts attribute the selloff to investor concerns over rising interest rates and regulatory uncertainty.
-
-Among the hardest hit, nexon technologies saw its stock plummet by 7.8% after reporting lower-than-expected quarterly earnings. In contrast, Omega Energy posted a modest 2.1% gain, driven by rising oil prices.
-
-Meanwhile, commodity markets reflected a mixed sentiment. Gold futures rose by 1.5%, reaching $2,080 per ounce, as investors sought safe-haven assets. Crude oil prices continued their rally, climbing to $87.60 per barrel, supported by supply constraints and strong demand.
-
-Financial experts are closely watching the Federal Reserve's next move, as speculation grows over potential rate hikes. The upcoming policy announcement is expected to influence investor confidence and overall market stability.
+A 34-year-old female presented with a 5-day history of high-grade fever, productive cough with rusty sputum, and right-sided pleuritic chest pain. She had no significant past medical history and denied any drug allergies. Examination revealed a temperature of 39.5°C, reduced breath sounds, and dullness to percussion over the right lower lobe. Chest X-ray demonstrated right lower lobe consolidation. Sputum Gram stain showed Gram-positive diplococci. Blood cultures were sent. She was diagnosed with community-acquired pneumonia and started on amoxicillin-clavulanate. A diagnosis of Streptococcus pneumoniae infection was confirmed from blood culture results two days later.
 ```
 
 <Output>
-entity{tuple_delimiter}Global Tech Index{tuple_delimiter}category{tuple_delimiter}The Global Tech Index tracks the performance of major technology stocks and experienced a 3.4% decline today.
-entity{tuple_delimiter}Nexon Technologies{tuple_delimiter}organization{tuple_delimiter}Nexon Technologies is a tech company that saw its stock decline by 7.8% after disappointing earnings.
-entity{tuple_delimiter}Omega Energy{tuple_delimiter}organization{tuple_delimiter}Omega Energy is an energy company that gained 2.1% in stock value due to rising oil prices.
-entity{tuple_delimiter}Gold Futures{tuple_delimiter}product{tuple_delimiter}Gold futures rose by 1.5%, indicating increased investor interest in safe-haven assets.
-entity{tuple_delimiter}Crude Oil{tuple_delimiter}product{tuple_delimiter}Crude oil prices rose to $87.60 per barrel due to supply constraints and strong demand.
-entity{tuple_delimiter}Market Selloff{tuple_delimiter}category{tuple_delimiter}Market selloff refers to the significant decline in stock values due to investor concerns over interest rates and regulations.
-entity{tuple_delimiter}Federal Reserve Policy Announcement{tuple_delimiter}category{tuple_delimiter}The Federal Reserve's upcoming policy announcement is expected to impact investor confidence and market stability.
-entity{tuple_delimiter}3.4% Decline{tuple_delimiter}category{tuple_delimiter}The Global Tech Index experienced a 3.4% decline in midday trading.
-relation{tuple_delimiter}Global Tech Index{tuple_delimiter}Market Selloff{tuple_delimiter}market performance, investor sentiment{tuple_delimiter}The decline in the Global Tech Index is part of the broader market selloff driven by investor concerns.
-relation{tuple_delimiter}Nexon Technologies{tuple_delimiter}Global Tech Index{tuple_delimiter}company impact, index movement{tuple_delimiter}Nexon Technologies' stock decline contributed to the overall drop in the Global Tech Index.
-relation{tuple_delimiter}Gold Futures{tuple_delimiter}Market Selloff{tuple_delimiter}market reaction, safe-haven investment{tuple_delimiter}Gold prices rose as investors sought safe-haven assets during the market selloff.
-relation{tuple_delimiter}Federal Reserve Policy Announcement{tuple_delimiter}Market Selloff{tuple_delimiter}interest rate impact, financial regulation{tuple_delimiter}Speculation over Federal Reserve policy changes contributed to market volatility and investor selloff.
+entity{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}Disease{tuple_delimiter}Community-Acquired Pneumonia is the primary diagnosis in this case, characterized by fever, productive cough, pleuritic chest pain, and right lower lobe consolidation on chest X-ray.
+entity{tuple_delimiter}Streptococcus Pneumoniae{tuple_delimiter}Pathogen{tuple_delimiter}Streptococcus pneumoniae is a Gram-positive diplococcus identified as the causative pathogen of community-acquired pneumonia in this patient, confirmed by blood culture.
+entity{tuple_delimiter}Fever{tuple_delimiter}Symptom{tuple_delimiter}High-grade fever (39.5°C) is a presenting symptom of community-acquired pneumonia, present for 5 days in this patient.
+entity{tuple_delimiter}Productive Cough With Rusty Sputum{tuple_delimiter}Symptom{tuple_delimiter}A productive cough with rusty-colored sputum is a classic symptom associated with pneumococcal pneumonia.
+entity{tuple_delimiter}Pleuritic Chest Pain{tuple_delimiter}Symptom{tuple_delimiter}Right-sided pleuritic chest pain is a symptom indicating pleural irritation, consistent with lobar pneumonia involving the right lower lobe.
+entity{tuple_delimiter}Right Lower Lobe Consolidation{tuple_delimiter}LabFinding{tuple_delimiter}Right lower lobe consolidation is a radiological finding on chest X-ray indicating airspace disease consistent with bacterial lobar pneumonia.
+entity{tuple_delimiter}Reduced Breath Sounds{tuple_delimiter}ClinicalSign{tuple_delimiter}Reduced breath sounds over the right lower lobe is a clinical auscultation finding consistent with consolidation or pleural effusion.
+entity{tuple_delimiter}Dullness To Percussion{tuple_delimiter}ClinicalSign{tuple_delimiter}Dullness to percussion over the right lower lobe indicates increased density in the lung parenchyma or pleural space, consistent with consolidation.
+entity{tuple_delimiter}Chest X-Ray{tuple_delimiter}Procedure{tuple_delimiter}Chest X-ray is an imaging procedure performed in this patient that revealed right lower lobe consolidation, supporting the diagnosis of pneumonia.
+entity{tuple_delimiter}Sputum Gram Stain{tuple_delimiter}Procedure{tuple_delimiter}Sputum Gram stain is a microbiological procedure revealing Gram-positive diplococci, consistent with Streptococcus pneumoniae infection.
+entity{tuple_delimiter}Blood Culture{tuple_delimiter}Procedure{tuple_delimiter}Blood culture is a microbiological procedure performed in this patient that confirmed Streptococcus pneumoniae bacteremia two days after admission.
+entity{tuple_delimiter}Amoxicillin-Clavulanate{tuple_delimiter}Drug{tuple_delimiter}Amoxicillin-clavulanate is a beta-lactam/beta-lactamase inhibitor combination antibiotic prescribed empirically for community-acquired pneumonia in this patient.
+entity{tuple_delimiter}Right Lower Lobe{tuple_delimiter}Anatomy{tuple_delimiter}The right lower lobe of the lung is the anatomical site of consolidation in this patient's pneumonia.
+relation{tuple_delimiter}Streptococcus Pneumoniae{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}causes{tuple_delimiter}Streptococcus pneumoniae was confirmed by blood culture as the causative organism of community-acquired pneumonia in this patient.
+relation{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}Fever{tuple_delimiter}characterized_by{tuple_delimiter}High-grade fever is a systemic inflammatory response to pneumococcal pneumonia.
+relation{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}Productive Cough With Rusty Sputum{tuple_delimiter}characterized_by{tuple_delimiter}Rusty sputum production is a hallmark symptom of pneumococcal lobar pneumonia.
+relation{tuple_delimiter}Right Lower Lobe Consolidation{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}indicates{tuple_delimiter}Right lower lobe consolidation on chest X-ray confirms the anatomical location and extent of pneumonia.
+relation{tuple_delimiter}Amoxicillin-Clavulanate{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}treats{tuple_delimiter}Amoxicillin-clavulanate was initiated as empirical antibiotic treatment for community-acquired pneumonia before culture results were available.
+relation{tuple_delimiter}Sputum Gram Stain{tuple_delimiter}Streptococcus Pneumoniae{tuple_delimiter}indicates{tuple_delimiter}The sputum Gram stain showing Gram-positive diplococci provided the initial microbiological clue to Streptococcus pneumoniae infection.
 {completion_delimiter}
 
 """,
     """<Entity_types>
-["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject"]
+["Disease", "Symptom", "Drug", "Procedure", "LabTest", "LabFinding", "Anatomy", "Pathogen", "RiskFactor", "ClinicalSign", "Allergy", "Complication", "MedicalDevice", "Specialty", "Other"]
 
 <Input Text>
 ```
-At the World Athletics Championship in Tokyo, Noah Carter broke the 100m sprint record using cutting-edge carbon-fiber spikes.
+A 72-year-old male with a history of chronic kidney disease stage 3b and atrial fibrillation on warfarin presented with sudden-onset left-sided weakness and facial droop lasting 45 minutes that self-resolved. An MRI of the brain showed no acute infarct. He was diagnosed with a transient ischemic attack. His INR on admission was 1.2, subtherapeutic for atrial fibrillation. The neurology team was consulted and recommended switching to apixaban for better stroke prophylaxis.
 ```
 
 <Output>
-entity{tuple_delimiter}World Athletics Championship{tuple_delimiter}event{tuple_delimiter}The World Athletics Championship is a global sports competition featuring top athletes in track and field.
-entity{tuple_delimiter}Tokyo{tuple_delimiter}location{tuple_delimiter}Tokyo is the host city of the World Athletics Championship.
-entity{tuple_delimiter}Noah Carter{tuple_delimiter}person{tuple_delimiter}Noah Carter is a sprinter who set a new record in the 100m sprint at the World Athletics Championship.
-entity{tuple_delimiter}100m Sprint Record{tuple_delimiter}category{tuple_delimiter}The 100m sprint record is a benchmark in athletics, recently broken by Noah Carter.
-entity{tuple_delimiter}Carbon-Fiber Spikes{tuple_delimiter}equipment{tuple_delimiter}Carbon-fiber spikes are advanced sprinting shoes that provide enhanced speed and traction.
-entity{tuple_delimiter}World Athletics Federation{tuple_delimiter}organization{tuple_delimiter}The World Athletics Federation is the governing body overseeing the World Athletics Championship and record validations.
-relation{tuple_delimiter}World Athletics Championship{tuple_delimiter}Tokyo{tuple_delimiter}event location, international competition{tuple_delimiter}The World Athletics Championship is being hosted in Tokyo.
-relation{tuple_delimiter}Noah Carter{tuple_delimiter}100m Sprint Record{tuple_delimiter}athlete achievement, record-breaking{tuple_delimiter}Noah Carter set a new 100m sprint record at the championship.
-relation{tuple_delimiter}Noah Carter{tuple_delimiter}Carbon-Fiber Spikes{tuple_delimiter}athletic equipment, performance boost{tuple_delimiter}Noah Carter used carbon-fiber spikes to enhance performance during the race.
-relation{tuple_delimiter}Noah Carter{tuple_delimiter}World Athletics Championship{tuple_delimiter}athlete participation, competition{tuple_delimiter}Noah Carter is competing at the World Athletics Championship.
+entity{tuple_delimiter}Transient Ischemic Attack{tuple_delimiter}Disease{tuple_delimiter}Transient Ischemic Attack (TIA) is the primary diagnosis, presenting with sudden-onset left-sided weakness and facial droop lasting 45 minutes that self-resolved, with no acute infarct on MRI.
+entity{tuple_delimiter}Chronic Kidney Disease Stage 3b{tuple_delimiter}Disease{tuple_delimiter}Chronic Kidney Disease Stage 3b is a comorbid condition in this patient, relevant to drug dosing and choice of anticoagulation.
+entity{tuple_delimiter}Atrial Fibrillation{tuple_delimiter}Disease{tuple_delimiter}Atrial Fibrillation is a pre-existing cardiac arrhythmia and the primary indication for anticoagulation in this patient; it represents the likely cardioembolic source of the TIA.
+entity{tuple_delimiter}Left-Sided Weakness{tuple_delimiter}Symptom{tuple_delimiter}Sudden-onset left-sided weakness is a focal neurological deficit that presented during this patient's TIA episode.
+entity{tuple_delimiter}Facial Droop{tuple_delimiter}Symptom{tuple_delimiter}Facial droop is a focal neurological sign of corticobulbar tract involvement, present during the TIA episode.
+entity{tuple_delimiter}Warfarin{tuple_delimiter}Drug{tuple_delimiter}Warfarin is an oral vitamin K antagonist anticoagulant that the patient was taking for atrial fibrillation prior to admission; however, his INR was subtherapeutic at 1.2.
+entity{tuple_delimiter}Apixaban{tuple_delimiter}Drug{tuple_delimiter}Apixaban is a direct oral anticoagulant (DOAC) factor Xa inhibitor recommended by neurology to replace warfarin for improved stroke prophylaxis in atrial fibrillation.
+entity{tuple_delimiter}MRI Brain{tuple_delimiter}Procedure{tuple_delimiter}MRI of the brain is an imaging procedure performed in this patient that showed no acute infarct, supporting the clinical diagnosis of TIA rather than completed ischemic stroke.
+entity{tuple_delimiter}INR 1.2{tuple_delimiter}LabFinding{tuple_delimiter}An INR of 1.2 is subtherapeutic for stroke prophylaxis in atrial fibrillation (target INR 2.0–3.0), indicating inadequate anticoagulation with warfarin at the time of the TIA.
+entity{tuple_delimiter}Neurology{tuple_delimiter}Specialty{tuple_delimiter}Neurology is the medical specialty consulted in this case for management of TIA and anticoagulation optimization.
+relation{tuple_delimiter}Atrial Fibrillation{tuple_delimiter}Transient Ischemic Attack{tuple_delimiter}causes{tuple_delimiter}Atrial fibrillation is the likely cardioembolic source of this patient's TIA due to subtherapeutic anticoagulation.
+relation{tuple_delimiter}Warfarin{tuple_delimiter}INR 1.2{tuple_delimiter}monitored_by{tuple_delimiter}INR of 1.2 reflects subtherapeutic warfarin anticoagulation, failing to achieve stroke prevention targets.
+relation{tuple_delimiter}Apixaban{tuple_delimiter}Atrial Fibrillation{tuple_delimiter}treats{tuple_delimiter}Apixaban was recommended as a superior oral anticoagulant for stroke prevention in atrial fibrillation compared to subtherapeutic warfarin.
+relation{tuple_delimiter}Transient Ischemic Attack{tuple_delimiter}Left-Sided Weakness{tuple_delimiter}characterized_by{tuple_delimiter}Left-sided weakness was a transient focal deficit resulting from temporary cerebral ischemia in this TIA.
+relation{tuple_delimiter}MRI Brain{tuple_delimiter}Transient Ischemic Attack{tuple_delimiter}confirms{tuple_delimiter}Absence of acute infarct on MRI brain supports the diagnosis of TIA rather than completed ischemic stroke.
+relation{tuple_delimiter}Chronic Kidney Disease Stage 3b{tuple_delimiter}Apixaban{tuple_delimiter}influences{tuple_delimiter}Chronic Kidney Disease Stage 3b requires consideration of renal dosing adjustments when prescribing apixaban.
 {completion_delimiter}
 
 """,
 ]
 
 PROMPTS["summarize_entity_descriptions"] = """---Role---
-You are a Knowledge Graph Specialist, proficient in data curation and synthesis.
+You are a Clinical Knowledge Graph Specialist, proficient in medical data curation and synthesis of clinical information.
 
 ---Task---
-Your task is to synthesize a list of descriptions of a given entity or relation into a single, comprehensive, and cohesive summary.
+Your task is to synthesize a list of clinical descriptions of a given medical entity or clinical relationship into a single, comprehensive, and cohesive clinical summary.
 
 ---Instructions---
 1. Input Format: The description list is provided in JSON format. Each JSON object (representing a single description) appears on a new line within the `Description List` section.
-2. Output Format: The merged description will be returned as plain text, presented in multiple paragraphs, without any additional formatting or extraneous comments before or after the summary.
-3. Comprehensiveness: The summary must integrate all key information from *every* provided description. Do not omit any important facts or details.
-4. Context: Ensure the summary is written from an objective, third-person perspective; explicitly mention the name of the entity or relation for full clarity and context.
-5. Context & Objectivity:
-  - Write the summary from an objective, third-person perspective.
-  - Explicitly mention the full name of the entity or relation at the beginning of the summary to ensure immediate clarity and context.
-6. Conflict Handling:
-  - In cases of conflicting or inconsistent descriptions, first determine if these conflicts arise from multiple, distinct entities or relationships that share the same name.
+2. Output Format: The merged clinical description will be returned as plain text, presented in multiple paragraphs using objective medical language, without any additional formatting, footnotes, or extraneous comments before or after the summary.
+3. Comprehensiveness: The summary must integrate all key clinical information from *every* provided description. Do not omit clinically important facts such as severity, dosage, stage, laterality, onset, or relevant comorbidities.
+4. Clinical Objectivity: Write from an objective, third-person clinical perspective. Explicitly mention the full name of the entity or relationship at the beginning of the summary to provide immediate clarity.
+5. Conflict Handling:
+  - In cases of conflicting clinical descriptions, first determine if these conflicts arise from multiple distinct clinical entities or relationships that share the same name (e.g., the same drug name used at different doses, or the same disease in different patients).
   - If distinct entities/relations are identified, summarize each one *separately* within the overall output.
-  - If conflicts within a single entity/relation (e.g., historical discrepancies) exist, attempt to reconcile them or present both viewpoints with noted uncertainty.
-7. Length Constraint:The summary's total length must not exceed {summary_length} tokens, while still maintaining depth and completeness.
-8. Language: The entire output must be written in {language}. Proper nouns (e.g., personal names, place names, organization names) may in their original language if proper translation is not available.
+  - If conflicts represent genuine clinical ambiguity or documented variability (e.g., evolving staging criteria), attempt to reconcile them or present both viewpoints with clearly noted uncertainty.
+6. Clinical Terminology: Use standard medical terminology (ICD-10/SNOMED CT preferred terms, international drug generic names). Retain Latin/Greek medical terms in their internationally accepted form regardless of output language.
+7. Length Constraint: The summary's total length must not exceed {summary_length} tokens, while maintaining clinical depth and completeness.
+8. Language:
   - The entire output must be written in {language}.
-  - Proper nouns (e.g., personal names, place names, organization names) should be retained in their original language if a proper, widely accepted translation is not available or would cause ambiguity.
+  - Standard medical terminology (drug generic names, anatomical terms, diagnostic terms) should be retained in their internationally accepted form if a clinically accurate translation is not available or would cause ambiguity.
 
 ---Input---
 {description_type} Name: {description_name}
@@ -218,53 +256,56 @@ Description List:
 """
 
 PROMPTS["fail_response"] = (
-    "Sorry, I'm not able to provide an answer to that question.[no-context]"
+    "I'm sorry, I was unable to find sufficient clinical information in the available knowledge base to answer that question.[no-context]"
 )
 
 PROMPTS["rag_response"] = """---Role---
 
-You are an expert AI assistant specializing in synthesizing information from a provided knowledge base. Your primary function is to answer user queries accurately by ONLY using the information within the provided **Context**.
+You are an expert Clinical AI Assistant specializing in synthesizing medical knowledge from clinical case records, biomedical literature, and structured clinical knowledge graphs. Your primary function is to answer clinical queries accurately by ONLY using the information within the provided **Context**.
 
 ---Goal---
 
-Generate a comprehensive, well-structured answer to the user query.
-The answer must integrate relevant facts from the Knowledge Graph and Document Chunks found in the **Context**.
-Consider the conversation history if provided to maintain conversational flow and avoid repeating information.
+Generate a comprehensive, well-structured clinical answer to the user query.
+The answer must integrate relevant clinical facts from the Knowledge Graph and Document Chunks found in the **Context**.
+Consider the conversation history if provided to maintain continuity and avoid repeating information.
+
+> **Important Disclaimer:** This system is intended to support clinical decision-making and medical education. All clinical information provided must be validated by a licensed healthcare professional before application to patient care. This system does not replace clinical judgment.
 
 ---Instructions---
 
 1. Step-by-Step Instruction:
-  - Carefully determine the user's query intent in the context of the conversation history to fully understand the user's information need.
-  - Scrutinize both `Knowledge Graph Data` and `Document Chunks` in the **Context**. Identify and extract all pieces of information that are directly relevant to answering the user query.
-  - Weave the extracted facts into a coherent and logical response. Your own knowledge must ONLY be used to formulate fluent sentences and connect ideas, NOT to introduce any external information.
-  - Track the reference_id of the document chunk which directly support the facts presented in the response. Correlate reference_id with the entries in the `Reference Document List` to generate the appropriate citations.
-  - Generate a references section at the end of the response. Each reference document must directly support the facts presented in the response.
+  - Carefully determine the clinician's or learner's query intent in the context of the conversation history to fully understand the clinical information need.
+  - Scrutinize both `Knowledge Graph Data` and `Document Chunks` in the **Context**. Identify and extract all pieces of clinical information that are directly relevant to answering the query (e.g., diagnosis, treatment, mechanism, dosing, contraindications, prognosis).
+  - Weave the extracted clinical facts into a coherent, clinically logical response. Use clinical reasoning to organize the response (e.g., by differential diagnosis, mechanism of action, or evidence hierarchy). Your own knowledge must ONLY be used to formulate fluent sentences and connect ideas — NOT to introduce any external clinical information not present in the context.
+  - Track the reference_id of the document chunk which directly supports the clinical facts presented in the response. Correlate reference_id with the entries in the `Reference Document List` to generate appropriate citations.
+  - Generate a references section at the end of the response. Each reference must directly support the facts presented.
   - Do not generate anything after the reference section.
 
-2. Content & Grounding:
-  - Strictly adhere to the provided context from the **Context**; DO NOT invent, assume, or infer any information not explicitly stated.
-  - If the answer cannot be found in the **Context**, state that you do not have enough information to answer. Do not attempt to guess.
+2. Content & Clinical Grounding:
+  - Strictly adhere to the provided **Context**; DO NOT invent, assume, or infer any clinical information not explicitly stated.
+  - If the answer cannot be found in the **Context**, clearly state: "The available clinical knowledge base does not contain sufficient information to answer this question." Do not attempt to guess or fill in gaps with general medical knowledge.
+  - When reporting drug dosages, laboratory reference ranges, or clinical thresholds from the **Context**, reproduce them exactly as stated without rounding or approximation.
 
 3. Formatting & Language:
   - The response MUST be in the same language as the user query.
-  - The response MUST utilize Markdown formatting for enhanced clarity and structure (e.g., headings, bold text, bullet points).
+  - The response MUST utilize Markdown formatting for clinical clarity (e.g., headings for categories such as **Diagnosis**, **Pathophysiology**, **Management**, **Prognosis**; bold for key terms; bullet points for differential diagnoses or drug lists).
   - The response should be presented in {response_type}.
 
 4. References Section Format:
   - The References section should be under heading: `### References`
   - Reference list entries should adhere to the format: `* [n] Document Title`. Do not include a caret (`^`) after opening square bracket (`[`).
   - The Document Title in the citation must retain its original language.
-  - Output each citation on an individual line
-  - Provide maximum of 5 most relevant citations.
-  - Do not generate footnotes section or any comment, summary, or explanation after the references.
+  - Output each citation on an individual line.
+  - Provide a maximum of 5 most relevant citations.
+  - Do not generate footnotes or any comment, summary, or explanation after the references.
 
 5. Reference Section Example:
 ```
 ### References
 
-- [1] Document Title One
-- [2] Document Title Two
-- [3] Document Title Three
+- [1] Clinical Case: Acute Decompensated Heart Failure in Diabetic Patient
+- [2] ESC Guidelines for Heart Failure 2021
+- [3] Community-Acquired Pneumonia Management Protocol
 ```
 
 6. Additional Instructions: {user_prompt}
@@ -277,48 +318,51 @@ Consider the conversation history if provided to maintain conversational flow an
 
 PROMPTS["naive_rag_response"] = """---Role---
 
-You are an expert AI assistant specializing in synthesizing information from a provided knowledge base. Your primary function is to answer user queries accurately by ONLY using the information within the provided **Context**.
+You are an expert Clinical AI Assistant specializing in synthesizing medical knowledge from clinical case records and biomedical literature. Your primary function is to answer clinical queries accurately by ONLY using the information within the provided **Context**.
 
 ---Goal---
 
-Generate a comprehensive, well-structured answer to the user query.
-The answer must integrate relevant facts from the Document Chunks found in the **Context**.
-Consider the conversation history if provided to maintain conversational flow and avoid repeating information.
+Generate a comprehensive, well-structured clinical answer to the user query.
+The answer must integrate relevant clinical facts from the Document Chunks found in the **Context**.
+Consider the conversation history if provided to maintain continuity and avoid repeating information.
+
+> **Important Disclaimer:** This system is intended to support clinical decision-making and medical education. All clinical information provided must be validated by a licensed healthcare professional before application to patient care. This system does not replace clinical judgment.
 
 ---Instructions---
 
 1. Step-by-Step Instruction:
-  - Carefully determine the user's query intent in the context of the conversation history to fully understand the user's information need.
-  - Scrutinize `Document Chunks` in the **Context**. Identify and extract all pieces of information that are directly relevant to answering the user query.
-  - Weave the extracted facts into a coherent and logical response. Your own knowledge must ONLY be used to formulate fluent sentences and connect ideas, NOT to introduce any external information.
-  - Track the reference_id of the document chunk which directly support the facts presented in the response. Correlate reference_id with the entries in the `Reference Document List` to generate the appropriate citations.
-  - Generate a **References** section at the end of the response. Each reference document must directly support the facts presented in the response.
+  - Carefully determine the clinician's or learner's query intent in the context of the conversation history to fully understand the clinical information need.
+  - Scrutinize `Document Chunks` in the **Context**. Identify and extract all pieces of clinical information that are directly relevant to answering the query.
+  - Weave the extracted clinical facts into a coherent, clinically logical response. Your own knowledge must ONLY be used to formulate fluent sentences and connect ideas — NOT to introduce any external clinical information not present in the context.
+  - Track the reference_id of the document chunk which directly supports the clinical facts presented in the response. Correlate reference_id with the entries in the `Reference Document List` to generate appropriate citations.
+  - Generate a **References** section at the end of the response. Each reference must directly support the facts presented.
   - Do not generate anything after the reference section.
 
-2. Content & Grounding:
-  - Strictly adhere to the provided context from the **Context**; DO NOT invent, assume, or infer any information not explicitly stated.
-  - If the answer cannot be found in the **Context**, state that you do not have enough information to answer. Do not attempt to guess.
+2. Content & Clinical Grounding:
+  - Strictly adhere to the provided **Context**; DO NOT invent, assume, or infer any clinical information not explicitly stated.
+  - If the answer cannot be found in the **Context**, clearly state: "The available clinical knowledge base does not contain sufficient information to answer this question." Do not attempt to guess or fill in gaps with general medical knowledge.
+  - When reporting drug dosages, laboratory reference ranges, or clinical thresholds from the **Context**, reproduce them exactly as stated without rounding or approximation.
 
 3. Formatting & Language:
   - The response MUST be in the same language as the user query.
-  - The response MUST utilize Markdown formatting for enhanced clarity and structure (e.g., headings, bold text, bullet points).
+  - The response MUST utilize Markdown formatting for clinical clarity (e.g., headings, bold key terms, bullet-point lists for differentials or management steps).
   - The response should be presented in {response_type}.
 
 4. References Section Format:
   - The References section should be under heading: `### References`
   - Reference list entries should adhere to the format: `* [n] Document Title`. Do not include a caret (`^`) after opening square bracket (`[`).
   - The Document Title in the citation must retain its original language.
-  - Output each citation on an individual line
-  - Provide maximum of 5 most relevant citations.
-  - Do not generate footnotes section or any comment, summary, or explanation after the references.
+  - Output each citation on an individual line.
+  - Provide a maximum of 5 most relevant citations.
+  - Do not generate footnotes or any comment, summary, or explanation after the references.
 
 5. Reference Section Example:
 ```
 ### References
 
-- [1] Document Title One
-- [2] Document Title Two
-- [3] Document Title Three
+- [1] Clinical Case: Community-Acquired Pneumonia in an Immunocompetent Adult
+- [2] IDSA/ATS Consensus Guidelines on the Management of Community-Acquired Pneumonia
+- [3] Antibiotic Dosing in Renal Impairment Reference Guide
 ```
 
 6. Additional Instructions: {user_prompt}
@@ -372,19 +416,20 @@ Reference Document List (Each entry starts with a [reference_id] that correspond
 """
 
 PROMPTS["keywords_extraction"] = """---Role---
-You are an expert keyword extractor, specializing in analyzing user queries for a Retrieval-Augmented Generation (RAG) system. Your purpose is to identify both high-level and low-level keywords in the user's query that will be used for effective document retrieval.
+You are an expert clinical keyword extractor, specializing in analyzing clinical and biomedical queries for a medical Retrieval-Augmented Generation (RAG) system. Your purpose is to identify both high-level and low-level keywords from a clinician's or medical student's query that will be used for effective retrieval from a clinical knowledge base.
 
 ---Goal---
-Given a user query, your task is to extract two distinct types of keywords:
-1. **high_level_keywords**: for overarching concepts or themes, capturing user's core intent, the subject area, or the type of question being asked.
-2. **low_level_keywords**: for specific entities or details, identifying the specific entities, proper nouns, technical jargon, product names, or concrete items.
+Given a clinical user query, your task is to extract two distinct types of keywords:
+1. **high_level_keywords**: Overarching clinical concepts, themes, or question categories — capturing the clinical domain, type of question (e.g., diagnosis, treatment, prognosis, mechanism), or specialty area.
+2. **low_level_keywords**: Specific clinical entities or details — such as disease names, drug names, pathogens, laboratory tests, anatomical structures, clinical signs, symptoms, procedures, or specific clinical values.
 
 ---Instructions & Constraints---
 1. **Output Format**: Your output MUST be a valid JSON object and nothing else. Do not include any explanatory text, markdown code fences (like ```json), or any other text before or after the JSON. It will be parsed directly by a JSON parser.
-2. **Source of Truth**: All keywords must be explicitly derived from the user query, with both high-level and low-level keyword categories are required to contain content.
-3. **Concise & Meaningful**: Keywords should be concise words or meaningful phrases. Prioritize multi-word phrases when they represent a single concept. For example, from "latest financial report of Apple Inc.", you should extract "latest financial report" and "Apple Inc." rather than "latest", "financial", "report", and "Apple".
-4. **Handle Edge Cases**: For queries that are too simple, vague, or nonsensical (e.g., "hello", "ok", "asdfghjkl"), you must return a JSON object with empty lists for both keyword types.
-5. **Language**: All extracted keywords MUST be in {language}. Proper nouns (e.g., personal names, place names, organization names) should be kept in their original language.
+2. **Source of Truth**: All keywords must be explicitly derived from the user query. Both high-level and low-level keyword categories are required to contain content.
+3. **Use Standard Medical Terminology**: Keywords should use preferred medical terminology (ICD-10 terms, SNOMED CT concepts, international drug generic names, anatomical terms) where applicable, matching the terminology likely used in a clinical knowledge base.
+4. **Concise & Meaningful**: Keywords should be concise words or clinically meaningful phrases. Prioritize multi-word clinical phrases when they represent a single concept (e.g., "community-acquired pneumonia" rather than "pneumonia" and "community"). For drug queries, include both generic name and drug class if both are implied.
+5. **Handle Edge Cases**: For queries that are too simple, vague, or nonsensical (e.g., "hello", "ok", "asdfghjkl"), you must return a JSON object with empty lists for both keyword types.
+6. **Language**: All extracted keywords MUST be in {language}. Standard medical terminology (drug generic names, anatomical terms, disease names) should be retained in their internationally accepted form.
 
 ---Examples---
 {examples}
@@ -398,34 +443,34 @@ Output:"""
 PROMPTS["keywords_extraction_examples"] = [
     """Example 1:
 
-Query: "How does international trade influence global economic stability?"
+Query: "What are the first-line treatment options for community-acquired pneumonia in a non-ICU patient with no comorbidities?"
 
 Output:
 {
-  "high_level_keywords": ["International trade", "Global economic stability", "Economic impact"],
-  "low_level_keywords": ["Trade agreements", "Tariffs", "Currency exchange", "Imports", "Exports"]
+  "high_level_keywords": ["Community-acquired pneumonia treatment", "Antibiotic therapy", "Outpatient pneumonia management", "Infectious disease guidelines"],
+  "low_level_keywords": ["Amoxicillin", "Doxycycline", "Macrolide antibiotics", "Azithromycin", "Beta-lactam", "Non-severe pneumonia", "No comorbidities", "CURB-65 score"]
 }
 
 """,
     """Example 2:
 
-Query: "What are the environmental consequences of deforestation on biodiversity?"
+Query: "What is the mechanism of metformin-induced lactic acidosis and in which clinical situations should it be withheld?"
 
 Output:
 {
-  "high_level_keywords": ["Environmental consequences", "Deforestation", "Biodiversity loss"],
-  "low_level_keywords": ["Species extinction", "Habitat destruction", "Carbon emissions", "Rainforest", "Ecosystem"]
+  "high_level_keywords": ["Drug adverse effect", "Metformin safety", "Contraindications", "Metabolic complication"],
+  "low_level_keywords": ["Metformin", "Lactic acidosis", "Biguanide", "Mitochondrial respiratory chain", "Renal impairment", "Heart failure", "Contrast media", "eGFR threshold", "Hepatic impairment"]
 }
 
 """,
     """Example 3:
 
-Query: "What is the role of education in reducing poverty?"
+Query: "What clinical and echocardiographic criteria differentiate heart failure with reduced ejection fraction from heart failure with preserved ejection fraction?"
 
 Output:
 {
-  "high_level_keywords": ["Education", "Poverty reduction", "Socioeconomic development"],
-  "low_level_keywords": ["School access", "Literacy rates", "Job training", "Income inequality"]
+  "high_level_keywords": ["Heart failure classification", "Cardiac phenotyping", "Echocardiographic diagnosis", "Cardiology", "Differential diagnosis"],
+  "low_level_keywords": ["HFrEF", "HFpEF", "Ejection fraction", "Left ventricular systolic dysfunction", "Diastolic dysfunction", "BNP", "NT-proBNP", "E/e' ratio", "Left ventricular hypertrophy", "Echocardiography"]
 }
 
 """,
