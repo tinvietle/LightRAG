@@ -26,6 +26,10 @@ from typing import (
 )
 from lightrag.prompt import PROMPTS
 from lightrag.exceptions import PipelineCancelledException
+from lightrag.multimodal import (
+    build_image_augmented_query,
+    describe_images_with_refinement,
+)
 from lightrag.constants import (
     DEFAULT_MAX_GLEANING,
     DEFAULT_FORCE_LLM_SUMMARY_ON_MERGE,
@@ -2890,13 +2894,23 @@ class LightRAG:
                 # Apply higher priority (8) to entity/relation summary tasks
                 use_llm_func = partial(use_llm_func, _priority=8)
 
+                bypass_query = query.strip()
+                if param.images:
+                    image_descriptions = await describe_images_with_refinement(
+                        param.images
+                    )
+                    bypass_query = build_image_augmented_query(
+                        bypass_query, image_descriptions
+                    )
+
                 param.stream = True if param.stream is None else param.stream
                 response = await use_llm_func(
-                    query.strip(),
+                    bypass_query,
                     system_prompt=system_prompt,
                     history_messages=param.conversation_history,
                     enable_cot=True,
                     stream=param.stream,
+                    images=param.images or None,
                 )
                 if type(response) is str:
                     return {

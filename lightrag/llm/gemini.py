@@ -443,6 +443,7 @@ async def gemini_model_complete(
     **kwargs: Any,
 ) -> str | AsyncIterator[str]:
     hashing_kv = kwargs.get("hashing_kv")
+    kwargs.pop("images", None)
     model_name = None
     if hashing_kv is not None:
         model_name = hashing_kv.global_config.get("llm_model_name")

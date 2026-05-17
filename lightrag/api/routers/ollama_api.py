@@ -485,6 +485,7 @@ class OllamaAPI:
 
                 # Get the last message as query and previous messages as history
                 query = messages[-1].content
+                images = messages[-1].images or []
                 # Convert OllamaMessage objects to dictionaries
                 conversation_history = [
                     {"role": msg.role, "content": msg.content} for msg in messages[:-1]
@@ -504,6 +505,7 @@ class OllamaAPI:
                     "only_need_context": only_need_context,
                     "conversation_history": conversation_history,
                     "top_k": self.top_k,
+                    "images": images,
                 }
 
                 # Add user_prompt to param_dict
@@ -521,6 +523,7 @@ class OllamaAPI:
                             cleaned_query,
                             stream=True,
                             history_messages=conversation_history,
+                            images=images,
                             **self.rag.llm_model_kwargs,
                         )
                     else:

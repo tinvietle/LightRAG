@@ -5,6 +5,7 @@ This module contains all query-related routes for the LightRAG API.
 import json
 from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
+from ..config import global_args
 from lightrag.base import QueryParam
 from lightrag.api.utils_api import get_combined_auth_dependency
 from lightrag.utils import logger
@@ -80,6 +81,11 @@ class QueryRequest(BaseModel):
         description="List of low-level keywords to refine retrieval focus. Leave empty to use the LLM to generate the keywords.",
     )
 
+    images: list[str] = Field(
+        default_factory=list,
+        description="Base64-encoded images attached to the query. Up to 10 images are supported.",
+    )
+
     conversation_history: Optional[List[Dict[str, Any]]] = Field(
         default=None,
         description="History messages are only sent to LLM for context, not used for retrieval. Format: [{'role': 'user/assistant', 'content': 'message'}].",
@@ -128,6 +134,14 @@ class QueryRequest(BaseModel):
             if not isinstance(msg["role"], str) or not msg["role"].strip():
                 raise ValueError("Each message 'role' must be a non-empty string.")
         return conversation_history
+
+    @field_validator("images", mode="after")
+    @classmethod
+    def images_limit_check(cls, images: list[str]) -> list[str]:
+        limit = getattr(global_args, 'image_upload_limit', 10)
+        if limit is not None and len(images) > limit:
+            raise ValueError(f"A maximum of {limit} images can be attached to a query.")
+        return [image.strip() for image in images if isinstance(image, str) and image.strip()]
 
     def to_query_params(self, is_stream: bool) -> "QueryParam":
         """Converts a QueryRequest instance into a QueryParam instance."""

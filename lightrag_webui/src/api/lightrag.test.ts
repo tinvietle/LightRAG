@@ -240,3 +240,23 @@ describe('getDocumentsPaginated', () => {
     })
   })
 })
+
+describe('buildCaseUploadFormData', () => {
+  test('includes the text file and linked images in request order', async () => {
+    const textFile = new File(['text case'], 'case-001.txt', { type: 'text/plain' })
+    const imageOne = new File(['image-one'], 'figure-1.png', { type: 'image/png' })
+    const imageTwo = new File(['image-two'], 'figure-2.jpg', { type: 'image/jpeg' })
+
+    const formData = apiModule.buildCaseUploadFormData(textFile, [imageOne, imageTwo])
+    const entries = Array.from(formData.entries()).map(([key, value]) => [
+      key,
+      value instanceof File ? value.name : value
+    ])
+
+    expect(entries).toEqual([
+      ['file', 'case-001.txt'],
+      ['images', 'figure-1.png'],
+      ['images', 'figure-2.jpg']
+    ])
+  })
+})

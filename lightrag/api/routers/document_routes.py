@@ -3,6 +3,8 @@ This module contains all document-related routes for the LightRAG API.
 """
 
 import asyncio
+import base64
+import shutil
 import time
 from uuid import uuid4
 from functools import lru_cache
@@ -30,6 +32,7 @@ from lightrag.utils import (
     compute_mdhash_id,
     sanitize_text_for_encoding,
 )
+from lightrag.multimodal import describe_images_with_refinement
 from lightrag.api.utils_api import get_combined_auth_dependency
 from ..config import global_args
 
@@ -963,6 +966,85 @@ def get_unique_filename_in_enqueued(target_dir: Path, original_name: str) -> str
     return f"{base_name}_{timestamp}{extension}"
 
 
+def get_case_image_dir(input_dir: Path, case_id: str) -> Path:
+    return input_dir / "images" / case_id
+
+
+async def save_case_images(
+    images: list[UploadFile],
+    case_image_dir: Path,
+) -> list[Path]:
+    """Persist uploaded images for a text case and return their saved paths."""
+    if not images:
+        return []
+
+    case_image_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths: list[Path] = []
+
+    for image in images[:5]:
+        if not image.filename:
+            raise HTTPException(status_code=400, detail="Image filename cannot be empty")
+
+        if image.content_type and not image.content_type.startswith("image/"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported image type for {image.filename}. Only image files are allowed.",
+            )
+
+        safe_image_name = sanitize_filename(image.filename, case_image_dir)
+        unique_image_name = get_unique_filename_in_enqueued(case_image_dir, safe_image_name)
+        unique_image_path = case_image_dir / unique_image_name
+
+        async with aiofiles.open(unique_image_path, "wb") as out_file:
+            while True:
+                chunk = await image.read(1024 * 1024)
+                if not chunk:
+                    break
+                await out_file.write(chunk)
+
+        saved_paths.append(unique_image_path)
+
+    return saved_paths
+
+
+def delete_case_image_dir(input_dir: Path, case_id: str) -> None:
+    """Delete the directory that stores images for a text case."""
+    case_image_dir = get_case_image_dir(input_dir, case_id)
+    if case_image_dir.exists():
+        shutil.rmtree(case_image_dir, ignore_errors=True)
+
+
+async def _augment_content_with_case_images(
+    content: str,
+    image_paths: list[Path] | None,
+) -> str:
+    if not image_paths:
+        return content
+
+    try:
+        image_data_list: list[str] = []
+        for image_path in image_paths[:5]:
+            image_bytes = await asyncio.to_thread(image_path.read_bytes)
+            image_data_list.append(base64.b64encode(image_bytes).decode("utf-8"))
+
+        image_descriptions = await describe_images_with_refinement(image_data_list)
+        if not image_descriptions:
+            return content
+
+        image_description_block = "\n".join(
+            f"- {description}" for description in image_descriptions if description.strip()
+        )
+        if not image_description_block:
+            return content
+
+        return (
+            f"{content.rstrip()}\n\nAttached image descriptions:\n{image_description_block}"
+        )
+    except Exception as exc:
+        logger.warning("Failed to enrich content with image descriptions: %s", exc)
+        return content
+
+
 # Document processing helper functions (synchronous)
 # These functions run in thread pool via asyncio.to_thread() to avoid blocking the event loop
 
@@ -1229,7 +1311,10 @@ def _extract_xlsx(file_bytes: bytes) -> str:
 
 
 async def pipeline_enqueue_file(
-    rag: LightRAG, file_path: Path, track_id: str = None
+    rag: LightRAG,
+    file_path: Path,
+    track_id: str = None,
+    image_paths: list[Path] | None = None,
 ) -> tuple[bool, str]:
     """Add a file to the queue for processing
 
@@ -1274,7 +1359,10 @@ async def pipeline_enqueue_file(
             logger.error(
                 f"[File Extraction]Permission denied reading file: {file_path.name}"
             )
-            return False, track_id
+            # If the case includes attached images, enrich the extracted text with their descriptions.
+            content = await _augment_content_with_case_images(content, image_paths)
+
+            # Insert into the RAG queue
         except FileNotFoundError as e:
             error_files = [
                 {
@@ -1583,6 +1671,8 @@ async def pipeline_enqueue_file(
             return False, track_id
 
         # Insert into the RAG queue
+        content = await _augment_content_with_case_images(content, image_paths)
+
         if content:
             # Check if content contains only whitespace characters
             if not content.strip():
@@ -1686,7 +1776,12 @@ async def pipeline_enqueue_file(
                 logger.error(f"Error deleting file {file_path}: {str(e)}")
 
 
-async def pipeline_index_file(rag: LightRAG, file_path: Path, track_id: str = None):
+async def pipeline_index_file(
+    rag: LightRAG,
+    file_path: Path,
+    track_id: str = None,
+    image_paths: list[Path] | None = None,
+):
     """Index a file with track_id
 
     Args:
@@ -1696,7 +1791,7 @@ async def pipeline_index_file(rag: LightRAG, file_path: Path, track_id: str = No
     """
     try:
         success, returned_track_id = await pipeline_enqueue_file(
-            rag, file_path, track_id
+            rag, file_path, track_id, image_paths
         )
         if success:
             await rag.apipeline_process_enqueue_documents()
@@ -1738,6 +1833,122 @@ async def pipeline_index_files(
     except Exception as e:
         logger.error(f"Error indexing files: {str(e)}")
         logger.error(traceback.format_exc())
+
+
+async def upload_case_to_input_dir(
+    rag: LightRAG,
+    doc_manager: "DocumentManager",
+    background_tasks: BackgroundTasks,
+    file: UploadFile,
+    images: list[UploadFile] | None = None,
+):
+    """Upload one text case and optional linked images, then schedule ingestion."""
+    safe_filename = sanitize_filename(file.filename, doc_manager.input_dir)
+
+    if not doc_manager.is_supported_file(safe_filename):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Supported types: {doc_manager.supported_extensions}",
+        )
+
+    if (
+        global_args.max_upload_size is not None
+        and global_args.max_upload_size > 0
+    ):
+        file_size = getattr(file, "size", None)
+        if file_size is not None and file_size > global_args.max_upload_size:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum size: {global_args.max_upload_size / 1024 / 1024:.1f}MB, uploaded: {file_size / 1024 / 1024:.1f}MB",
+            )
+
+    existing_doc_data = await rag.doc_status.get_doc_by_file_path(safe_filename)
+    if existing_doc_data:
+        status = existing_doc_data.get("status", "unknown")
+        existing_track_id = existing_doc_data.get("track_id") or ""
+        return InsertResponse(
+            status="duplicated",
+            message=f"File '{safe_filename}' already exists in document storage (Status: {status}).",
+            track_id=existing_track_id,
+        )
+
+    file_path = doc_manager.input_dir / safe_filename
+    if file_path.exists():
+        return InsertResponse(
+            status="duplicated",
+            message=f"File '{safe_filename}' already exists in the input directory.",
+            track_id="",
+        )
+
+    bytes_written = 0
+    chunk_size = 1024 * 1024
+    needs_cleanup = False
+
+    async with aiofiles.open(file_path, "wb") as out_file:
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+
+            if (
+                global_args.max_upload_size is not None
+                and global_args.max_upload_size > 0
+            ):
+                bytes_written += len(chunk)
+                if bytes_written > global_args.max_upload_size:
+                    needs_cleanup = True
+                    break
+
+            await out_file.write(chunk)
+
+    if needs_cleanup:
+        try:
+            file_path.unlink()
+        except Exception as cleanup_error:
+            logger.error(
+                f"Error cleaning up oversized file {safe_filename}: {cleanup_error}"
+            )
+
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size: {global_args.max_upload_size / 1024 / 1024:.1f}MB, uploaded: {bytes_written / 1024 / 1024:.1f}MB",
+        )
+
+    saved_image_paths: list[Path] = []
+    case_image_dir = get_case_image_dir(doc_manager.input_dir, safe_filename)
+    try:
+        if images:
+            if global_args.image_upload_limit is not None and len(images) > global_args.image_upload_limit:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"A maximum of {global_args.image_upload_limit} images can be attached to a case.",
+                )
+            saved_image_paths = await save_case_images(images, case_image_dir)
+    except Exception:
+        try:
+            if file_path.exists():
+                file_path.unlink()
+        finally:
+            delete_case_image_dir(doc_manager.input_dir, safe_filename)
+        raise
+
+    track_id = generate_track_id("upload")
+    background_tasks.add_task(
+        pipeline_index_file,
+        rag,
+        file_path,
+        track_id,
+        saved_image_paths,
+    )
+
+    image_count = len(saved_image_paths)
+    message = f"File '{safe_filename}' uploaded successfully. Processing will continue in background."
+    if image_count:
+        message = (
+            f"File '{safe_filename}' uploaded successfully with {image_count} attached image(s). Processing will continue in background."
+        )
+
+    return InsertResponse(status="success", message=message, track_id=track_id)
 
 
 async def pipeline_index_texts(
@@ -2035,6 +2246,12 @@ async def background_delete_documents(
                         async with pipeline_status_lock:
                             pipeline_status["latest_message"] = no_file_msg
                             pipeline_status["history_messages"].append(no_file_msg)
+
+                    if result.file_path and result.file_path != "unknown_source":
+                        delete_case_image_dir(
+                            doc_manager.input_dir,
+                            Path(result.file_path).name,
+                        )
                 else:
                     failed_deletions.append(doc_id)
                     error_msg = f"Failed to delete {i}/{total_docs}: {doc_id}[{file_path}] - {result.message}"
@@ -2119,14 +2336,17 @@ def create_document_routes(
         "/upload", response_model=InsertResponse, dependencies=[Depends(combined_auth)]
     )
     async def upload_to_input_dir(
-        background_tasks: BackgroundTasks, file: UploadFile = File(...)
+        background_tasks: BackgroundTasks,
+        file: UploadFile = File(...),
+        images: list[UploadFile] | None = File(default=None),
     ):
         """
-        Upload a file to the input directory and index it.
+        Upload a text case to the input directory and index it.
 
-        This API endpoint accepts a file through an HTTP POST request, checks if the
-        uploaded file is of a supported type, saves it in the specified input directory,
-        indexes it for retrieval, and returns a success status with relevant details.
+        This API endpoint accepts one text file through an HTTP POST request, optionally
+        accepts image files linked to that text case, saves the text file in the specified
+        input directory, stores the attached images under the case image directory, indexes
+        the case for retrieval, and returns a success status with relevant details.
 
         **File Size Limit:**
         - Configurable via `MAX_UPLOAD_SIZE` environment variable (default: 100MB)
@@ -2173,110 +2393,14 @@ def create_document_routes(
             HTTPException: If the file type is not supported (400), file too large (413), or other errors occur (500).
         """
         try:
-            # Sanitize filename to prevent Path Traversal attacks
-            safe_filename = sanitize_filename(file.filename, doc_manager.input_dir)
-
-            if not doc_manager.is_supported_file(safe_filename):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unsupported file type. Supported types: {doc_manager.supported_extensions}",
-                )
-
-            # Check file size limit (if configured)
-            if (
-                global_args.max_upload_size is not None
-                and global_args.max_upload_size > 0
-            ):
-                # Safe access to file size (not available in older Starlette versions)
-                file_size = getattr(file, "size", None)
-
-                # Pre-flight size check (only if size is available)
-                if file_size is not None:
-                    if file_size > global_args.max_upload_size:
-                        raise HTTPException(
-                            status_code=413,
-                            detail=f"File too large. Maximum size: {global_args.max_upload_size / 1024 / 1024:.1f}MB, uploaded: {file_size / 1024 / 1024:.1f}MB",
-                        )
-                else:
-                    # If size not available, we'll check during streaming
-                    logger.debug(
-                        f"File size not available in UploadFile for {safe_filename}, will check during streaming"
-                    )
-
-            # Check if filename already exists in doc_status storage
-            existing_doc_data = await rag.doc_status.get_doc_by_file_path(safe_filename)
-            if existing_doc_data:
-                # Get document status and track_id from existing document
-                status = existing_doc_data.get("status", "unknown")
-                # Use `or ""` to handle both missing key and None value (e.g., legacy rows without track_id)
-                existing_track_id = existing_doc_data.get("track_id") or ""
-                return InsertResponse(
-                    status="duplicated",
-                    message=f"File '{safe_filename}' already exists in document storage (Status: {status}).",
-                    track_id=existing_track_id,
-                )
-
-            file_path = doc_manager.input_dir / safe_filename
-            # Check if file already exists in file system
-            if file_path.exists():
-                return InsertResponse(
-                    status="duplicated",
-                    message=f"File '{safe_filename}' already exists in the input directory.",
-                    track_id="",
-                )
-
-            # Async streaming write with size check
-            bytes_written = 0
-            chunk_size = 1024 * 1024  # 1MB chunks
-            needs_cleanup = False
-
-            async with aiofiles.open(file_path, "wb") as out_file:
-                while True:
-                    # Read chunk from upload stream
-                    chunk = await file.read(chunk_size)
-                    if not chunk:
-                        break
-
-                    # Check size limit during streaming (if not checked before)
-                    if (
-                        global_args.max_upload_size is not None
-                        and global_args.max_upload_size > 0
-                    ):
-                        bytes_written += len(chunk)
-                        if bytes_written > global_args.max_upload_size:
-                            needs_cleanup = True
-                            break
-
-                    # Write chunk to file
-                    await out_file.write(chunk)
-
-            # Cleanup after file is closed
-            if needs_cleanup:
-                try:
-                    file_path.unlink()
-                except Exception as cleanup_error:
-                    logger.error(
-                        f"Error cleaning up oversized file {safe_filename}: {cleanup_error}"
-                    )
-
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"File too large. Maximum size: {global_args.max_upload_size / 1024 / 1024:.1f}MB, uploaded: {bytes_written / 1024 / 1024:.1f}MB",
-                )
-
-            track_id = generate_track_id("upload")
-
-            # Add to background tasks and get track_id
-            background_tasks.add_task(pipeline_index_file, rag, file_path, track_id)
-
-            return InsertResponse(
-                status="success",
-                message=f"File '{safe_filename}' uploaded successfully. Processing will continue in background.",
-                track_id=track_id,
+            return await upload_case_to_input_dir(
+                rag,
+                doc_manager,
+                background_tasks,
+                file,
+                images,
             )
-
         except HTTPException:
-            # Re-raise HTTP exceptions (400, 413, etc.)
             raise
         except Exception as e:
             logger.error(f"Error /documents/upload: {file.filename}: {str(e)}")
@@ -2606,6 +2730,17 @@ def create_document_routes(
                     pipeline_status["history_messages"].append(
                         f"Successfully deleted {deleted_files_count} files"
                     )
+
+            # Remove any uploaded case image directories as part of the clear operation.
+            image_root = doc_manager.input_dir / "images"
+            if image_root.exists():
+                try:
+                    shutil.rmtree(image_root, ignore_errors=True)
+                except Exception as image_cleanup_error:
+                    logger.error(
+                        f"Error deleting image directory {image_root}: {image_cleanup_error}"
+                    )
+                    errors.append(str(image_cleanup_error))
 
             # Prepare final result message
             final_message = ""

@@ -29,6 +29,7 @@ from lightrag.utils import (
     wrap_embedding_func_with_attrs,
     logger,
 )
+from lightrag.multimodal import build_ollama_multimodal_user_message
 
 
 _OLLAMA_CLOUD_HOST = "https://ollama.com"
@@ -89,15 +90,20 @@ async def _ollama_model_if_cache(
         headers["Authorization"] = f"Bearer {api_key}"
 
     host = _coerce_host_for_cloud_model(host, model)
+    images = kwargs.pop("images", None)
+    provided_messages = kwargs.pop("messages", None)
 
     ollama_client = ollama.AsyncClient(host=host, timeout=timeout, headers=headers)
 
     try:
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.extend(history_messages)
-        messages.append({"role": "user", "content": prompt})
+        if provided_messages is not None:
+            messages = provided_messages
+        else:
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.extend(history_messages)
+            messages.append(build_ollama_multimodal_user_message(prompt, images))
 
         response = await ollama_client.chat(model=model, messages=messages, **kwargs)
         if stream:

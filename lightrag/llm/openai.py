@@ -27,6 +27,7 @@ from lightrag.utils import (
     safe_unicode_decode,
     logger,
 )
+from lightrag.multimodal import build_openai_multimodal_user_content
 
 from lightrag.types import GPTKeywordExtractionFormat
 from lightrag.api import __api_version__
@@ -277,6 +278,7 @@ async def openai_complete_if_cache(
 
     # Remove special kwargs that shouldn't be passed to OpenAI
     kwargs.pop("hashing_kv", None)
+    images = kwargs.pop("images", None)
 
     # Extract client configuration options
     client_configs = kwargs.pop("openai_client_configs", {})
@@ -297,11 +299,21 @@ async def openai_complete_if_cache(
     )
 
     # Prepare messages
-    messages: list[dict[str, Any]] = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.extend(history_messages)
-    messages.append({"role": "user", "content": prompt})
+    provided_messages = kwargs.pop("messages", None)
+    messages: list[dict[str, Any]]
+    if provided_messages is not None:
+        messages = provided_messages
+    else:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.extend(history_messages)
+        messages.append(
+            {
+                "role": "user",
+                "content": build_openai_multimodal_user_content(prompt, images),
+            }
+        )
 
     logger.debug("===== Entering func of LLM =====")
     logger.debug(f"Model: {model}   Base URL: {base_url}")
@@ -311,8 +323,6 @@ async def openai_complete_if_cache(
     verbose_debug(f"System prompt: {system_prompt}")
     verbose_debug(f"Query: {prompt}")
     logger.debug("===== Sending Query to LLM =====")
-
-    messages = kwargs.pop("messages", messages)
 
     # Add explicit parameters back to kwargs so they're passed to OpenAI API
     if stream is not None:

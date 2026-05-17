@@ -74,6 +74,7 @@ async def hf_model_if_cache(
     messages.extend(history_messages)
     messages.append({"role": "user", "content": prompt})
     kwargs.pop("hashing_kv", None)
+    kwargs.pop("images", None)
     input_prompt = ""
     try:
         input_prompt = hf_tokenizer.apply_chat_template(

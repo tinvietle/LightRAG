@@ -459,6 +459,16 @@ def parse_args() -> argparse.Namespace:
         "MAX_UPLOAD_SIZE", 104857600, int, special_none=True
     )
 
+    # Image upload limit per text case (number of images allowed)
+    # Prefer MAX_IMAGES_UPLOAD env var; fall back to legacy IMAGE_UPLOAD_LIMIT.
+    # Default: 10
+    args.image_upload_limit = get_env_value(
+        "MAX_IMAGES_UPLOAD",
+        get_env_value("IMAGE_UPLOAD_LIMIT", 10, int),
+        int,
+        special_none=True,
+    )
+
     ollama_server_infos.LIGHTRAG_NAME = args.simulated_model_name
     ollama_server_infos.LIGHTRAG_TAG = args.simulated_model_tag
 

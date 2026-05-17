@@ -9,11 +9,16 @@ import { useSettingsStore } from '@/stores/settings'
 import { useDebounce } from '@/hooks/useDebounce'
 import QuerySettings from '@/components/retrieval/QuerySettings'
 import { ChatMessage, MessageWithError } from '@/components/retrieval/ChatMessage'
-import { EraserIcon, SendIcon, CopyIcon } from 'lucide-react'
+import { EraserIcon, SendIcon, CopyIcon, ImageIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { copyToClipboard } from '@/utils/clipboard'
 import type { QueryMode } from '@/api/lightrag'
+
+type SelectedImage = {
+  name: string
+  dataUrl: string
+}
 
 // Helper function to generate unique IDs with browser compatibility
 const generateUniqueId = () => {
@@ -24,6 +29,21 @@ const generateUniqueId = () => {
   // Fallback to timestamp + random string for browsers without crypto.randomUUID
   return `id-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 };
+
+const readFileAsDataUrl = (file: File) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result
+      if (typeof result !== 'string') {
+        reject(new Error('Failed to read image file'))
+        return
+      }
+      resolve(result.split(',')[1] || '')
+    }
+    reader.onerror = () => reject(reader.error || new Error('Failed to read image file'))
+    reader.readAsDataURL(file)
+  })
 
 // LaTeX completeness detection function
 const detectLatexCompleteness = (content: string): boolean => {
@@ -141,6 +161,9 @@ export default function RetrievalTesting() {
   const [isLoading, setIsLoading] = useState(false)
   const [inputError, setInputError] = useState('') // Error message for input
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null)
+  const imageInputRef = useRef<HTMLInputElement>(null)
+  const [selectedImages, setSelectedImages] = useState<SelectedImage[]>([])
+  const [serverImageLimit, setServerImageLimit] = useState<number | null>(null)
 
   // Smart switching logic: use Input for single line, Textarea for multi-line
   const hasMultipleLines = inputValue.includes('\n')
@@ -151,12 +174,62 @@ export default function RetrievalTesting() {
     if (inputError) setInputError('')
   }, [inputError])
 
+  const handleAddImagesClick = useCallback(() => {
+    imageInputRef.current?.click()
+  }, [])
+
+  const handleImageSelection = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(e.target.files || [])
+      e.target.value = ''
+
+      if (!files.length) {
+        return
+      }
+
+      const limit = serverImageLimit ?? 10
+      const availableSlots = limit - selectedImages.length
+      if (availableSlots <= 0) {
+        setInputError(t('retrievePanel.retrieval.imageLimitReached', `You can attach up to ${limit} images.`))
+        return
+      }
+
+      const filesToUse = files.slice(0, availableSlots)
+      if (files.length > availableSlots) {
+        setInputError(
+          t('retrievePanel.retrieval.imageLimitPartial', 'Only the first {{count}} images were added. You can attach up to {{limit}} images.', { count: availableSlots, limit })
+        )
+      } else if (inputError) {
+        setInputError('')
+      }
+
+      const nextImages = await Promise.all(
+        filesToUse.map(async (file) => ({
+          name: file.name,
+          dataUrl: await readFileAsDataUrl(file),
+        }))
+      )
+
+      setSelectedImages((current) => [...current, ...nextImages])
+    },
+    [inputError, selectedImages.length, t]
+  )
+
   // Unified height adjustment function for textarea
   const adjustTextareaHeight = useCallback((element: HTMLTextAreaElement) => {
     requestAnimationFrame(() => {
       element.style.height = 'auto'
       element.style.height = Math.min(element.scrollHeight, 120) + 'px'
     })
+  }, [])
+
+  useEffect(() => {
+    fetch('/api/config')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.image_upload_limit) setServerImageLimit(Number(data.image_upload_limit))
+      })
+      .catch(() => {})
   }, [])
 
   // Scroll to bottom function - restored smooth scrolling with better handling
@@ -358,6 +431,7 @@ export default function RetrievalTesting() {
         ...state.querySettings,
         query: actualQuery,
         response_type: 'Multiple Paragraphs',
+        images: selectedImages.map((image) => image.dataUrl),
         conversation_history: effectiveHistoryTurns > 0
           ? prevMessages
             .filter((m) => m.isError !== true)
@@ -391,6 +465,10 @@ export default function RetrievalTesting() {
         // Clear loading and add messages to state
         setIsLoading(false)
         isReceivingResponseRef.current = false
+        setSelectedImages([])
+        if (imageInputRef.current) {
+          imageInputRef.current.value = ''
+        }
 
         // Enhanced cleanup with error handling to prevent memory leaks
         try {
@@ -430,7 +508,7 @@ export default function RetrievalTesting() {
         }
       }
     },
-    [inputValue, isLoading, messages, setMessages, t, scrollToBottom]
+    [inputValue, isLoading, messages, selectedImages, setMessages, t, scrollToBottom]
   )
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -619,8 +697,12 @@ export default function RetrievalTesting() {
 
   const clearMessages = useCallback(() => {
     setMessages([])
+    setSelectedImages([])
+    if (imageInputRef.current) {
+      imageInputRef.current.value = ''
+    }
     useSettingsStore.getState().setRetrievalHistory([])
-  }, [setMessages])
+  }, [setMessages, setSelectedImages])
 
   // Handle copying message content with robust clipboard support
   const handleCopyMessage = useCallback(async (message: MessageWithError) => {
@@ -752,6 +834,14 @@ export default function RetrievalTesting() {
         >
           {/* Hidden submit button to ensure form meets HTML standards */}
           <input type="submit" style={{ display: 'none' }} tabIndex={-1} />
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={handleImageSelection}
+          />
           <Button
             type="button"
             variant="outline"
@@ -761,6 +851,17 @@ export default function RetrievalTesting() {
           >
             <EraserIcon />
             {t('retrievePanel.retrieval.clear')}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={handleAddImagesClick}
+            disabled={isLoading}
+            size="sm"
+          >
+            <ImageIcon />
+            {t('retrievePanel.retrieval.addImages', 'Add images')}
+            {selectedImages.length > 0 ? ` (${selectedImages.length}/${serverImageLimit ?? 10})` : ''}
           </Button>
           <div className="flex-1 relative">
             <label htmlFor="query-input" className="sr-only">
@@ -810,6 +911,19 @@ export default function RetrievalTesting() {
             {/* Error message below input */}
             {inputError && (
               <div className="absolute left-0 top-full mt-1 text-xs text-red-500">{inputError}</div>
+            )}
+            {selectedImages.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                {selectedImages.map((image, index) => (
+                  <span
+                    key={`${image.name}-${index}`}
+                    className="max-w-40 truncate rounded-full border bg-background px-2 py-1"
+                    title={image.name}
+                  >
+                    {image.name}
+                  </span>
+                ))}
+              </div>
             )}
           </div>
           <Button type="submit" variant="default" disabled={isLoading} size="sm">

@@ -54,6 +54,7 @@ async def lollms_model_if_cache(
         logger.debug("enable_cot=True is not supported for lollms and will be ignored.")
 
     stream = True if kwargs.get("stream") else False
+    kwargs.pop("images", None)
     api_key = kwargs.pop("api_key", None)
     headers = (
         {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}

@@ -52,6 +52,11 @@ from lightrag.base import (
     QueryContextResult,
 )
 from lightrag.prompt import PROMPTS
+from lightrag.multimodal import (
+    build_image_augmented_query,
+    describe_images_with_refinement,
+)
+from lightrag.kg.ner import recognize_entities
 from lightrag.constants import (
     GRAPH_FIELD_SEP,
     DEFAULT_MAX_ENTITY_TOKENS,
@@ -2949,6 +2954,18 @@ async def extract_entities(
         # Create cache keys collector for batch processing
         cache_keys_collector = []
 
+        # Run NER to recognize entities and use as context for LLM extraction
+        recognized_entities_str, _ = await recognize_entities(
+            content,
+            entity_types,
+            threshold=0.3
+        )
+        # Format recognized entities section for prompt (only include if entities found)
+        if recognized_entities_str:
+            recognized_entities_section = f"<Recognized_Entities_from_NER>\n{recognized_entities_str}\n</Recognized_Entities_from_NER>\n"
+        else:
+            recognized_entities_section = ""
+
         # Get initial extraction
         # Format system prompt without input_text for each chunk (enables OpenAI prompt caching across chunks)
         entity_extraction_system_prompt = PROMPTS[
@@ -2956,11 +2973,11 @@ async def extract_entities(
         ].format(**context_base)
         # Format user prompts with input_text for each chunk
         entity_extraction_user_prompt = PROMPTS["entity_extraction_user_prompt"].format(
-            **{**context_base, "input_text": content}
+            **{**context_base, "input_text": content, "recognized_entities_section": recognized_entities_section}
         )
         entity_continue_extraction_user_prompt = PROMPTS[
             "entity_continue_extraction_user_prompt"
-        ].format(**{**context_base, "input_text": content})
+        ].format(**{**context_base, "input_text": content, "recognized_entities_section": recognized_entities_section})
 
         final_result, timestamp = await use_llm_func_with_cache(
             entity_extraction_user_prompt,
@@ -3216,8 +3233,13 @@ async def kg_query(
         # Apply higher priority (5) to query relation LLM function
         use_model_func = partial(use_model_func, _priority=5)
 
+    query_for_pipeline = query
+    if getattr(query_param, "images", None):
+        image_descriptions = await describe_images_with_refinement(query_param.images)
+        query_for_pipeline = build_image_augmented_query(query, image_descriptions)
+
     hl_keywords, ll_keywords = await get_keywords_from_query(
-        query, query_param, global_config, hashing_kv
+        query_for_pipeline, query_param, global_config, hashing_kv
     )
 
     logger.debug(f"High-level keywords: {hl_keywords}")
@@ -3240,7 +3262,7 @@ async def kg_query(
 
     # Build query context (unified interface)
     context_result = await _build_query_context(
-        query,
+        query_for_pipeline,
         ll_keywords_str,
         hl_keywords_str,
         knowledge_graph_inst,
@@ -3276,7 +3298,7 @@ async def kg_query(
         context_data=context_result.context,
     )
 
-    user_query = query
+    user_query = query_for_pipeline
 
     if query_param.only_need_prompt:
         prompt_content = "\n\n".join([sys_prompt, "---User Query---", user_query])
@@ -3284,15 +3306,15 @@ async def kg_query(
 
     # Call LLM
     tokenizer: Tokenizer = global_config["tokenizer"]
-    len_of_prompts = len(tokenizer.encode(query + sys_prompt))
+    len_of_prompts = len(tokenizer.encode(query_for_pipeline + sys_prompt))
     logger.debug(
-        f"[kg_query] Sending to LLM: {len_of_prompts:,} tokens (Query: {len(tokenizer.encode(query))}, System: {len(tokenizer.encode(sys_prompt))})"
+        f"[kg_query] Sending to LLM: {len_of_prompts:,} tokens (Query: {len(tokenizer.encode(query_for_pipeline))}, System: {len(tokenizer.encode(sys_prompt))})"
     )
 
     # Handle cache
     args_hash = compute_args_hash(
         query_param.mode,
-        query,
+        query_for_pipeline,
         query_param.response_type,
         query_param.top_k,
         query_param.chunk_top_k,
@@ -3301,12 +3323,17 @@ async def kg_query(
         query_param.max_total_tokens,
         hl_keywords_str,
         ll_keywords_str,
+        compute_mdhash_id("|".join(query_param.images)) if query_param.images else "",
         query_param.user_prompt or "",
         query_param.enable_rerank,
     )
 
     cached_result = await handle_cache(
-        hashing_kv, args_hash, user_query, query_param.mode, cache_type="query"
+        hashing_kv,
+        args_hash,
+        query_for_pipeline,
+        query_param.mode,
+        cache_type="query",
     )
 
     if cached_result is not None:
@@ -3322,6 +3349,7 @@ async def kg_query(
             history_messages=query_param.conversation_history,
             enable_cot=True,
             stream=query_param.stream,
+            images=query_param.images or None,
         )
 
         if hashing_kv and hashing_kv.global_config.get("enable_llm_cache"):
@@ -3335,6 +3363,7 @@ async def kg_query(
                 "max_total_tokens": query_param.max_total_tokens,
                 "hl_keywords": hl_keywords_str,
                 "ll_keywords": ll_keywords_str,
+                "image_signature": compute_mdhash_id("|".join(query_param.images)) if query_param.images else "",
                 "user_prompt": query_param.user_prompt or "",
                 "enable_rerank": query_param.enable_rerank,
             }
@@ -3343,7 +3372,7 @@ async def kg_query(
                 CacheData(
                     args_hash=args_hash,
                     content=response,
-                    prompt=query,
+                    prompt=query_for_pipeline,
                     mode=query_param.mode,
                     cache_type="query",
                     queryparam=queryparam_dict,
@@ -3358,7 +3387,7 @@ async def kg_query(
                 response.replace(sys_prompt, "")
                 .replace("user", "")
                 .replace("model", "")
-                .replace(query, "")
+                .replace(query_for_pipeline, "")
                 .replace("<system>", "")
                 .replace("</system>", "")
                 .strip()

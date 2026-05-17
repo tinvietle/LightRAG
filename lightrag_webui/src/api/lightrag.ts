@@ -138,6 +138,8 @@ export type QueryRequest = {
   user_prompt?: string
   /** Enable reranking for retrieved text chunks. If True but no rerank model is configured, a warning will be issued. Default is True. */
   enable_rerank?: boolean
+  /** Base64-encoded images attached to the query. */
+  images?: string[]
 }
 
 export type QueryResponse = {
@@ -795,6 +797,40 @@ export const uploadDocument = async (
 ): Promise<DocActionResponse> => {
   const formData = new FormData()
   formData.append('file', file)
+
+  const response = await axiosInstance.post('/documents/upload', formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data'
+    },
+    // prettier-ignore
+    onUploadProgress:
+      onUploadProgress !== undefined
+        ? (progressEvent) => {
+          const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total!)
+          onUploadProgress(percentCompleted)
+        }
+        : undefined
+  })
+  return response.data
+}
+
+export const buildCaseUploadFormData = (file: File, images: File[] = []) => {
+  const formData = new FormData()
+  formData.append('file', file)
+
+  images.forEach((image) => {
+    formData.append('images', image)
+  })
+
+  return formData
+}
+
+export const uploadCaseDocument = async (
+  file: File,
+  images: File[] = [],
+  onUploadProgress?: (percentCompleted: number) => void
+): Promise<DocActionResponse> => {
+  const formData = buildCaseUploadFormData(file, images)
 
   const response = await axiosInstance.post('/documents/upload', formData, {
     headers: {
