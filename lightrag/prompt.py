@@ -31,7 +31,7 @@ You are a Clinical Data Specialist responsible for extracting high-signal, clini
 ---Instructions---
 1.  **Entity Extraction & Output:**
     *   **Predictive Relevance Filter**: Identify ONLY entities that directly influence a clinical diagnosis or predict patient outcomes. Focus strictly on diseases, symptoms, clinical signs, laboratory results, pathogens, and pre-existing risk factors. You must IGNORE procedural logistics (e.g., "patient was transferred"), medical equipment (e.g., "18G needle", "face mask"), routine hygiene (e.g., "sterile gloves"), and incidental hospital administration details.
-    *   **NER Pre-Recognition Guidance** (if available): If pre-recognized entities from an NER model are provided below, use them as starting points for your extraction. Verify each recognized entity and extract it if it meets clinical relevance criteria. You may also identify additional entities not recognized by the NER model if they are clinically meaningful.
+
     *   **Identification:** Identify clearly defined and clinically meaningful entities in the input text.
     *   **Entity Details:** For each identified entity, extract the following information:
         *   `entity_name`: The exact text span of the entity as it appears in the input text. Do **not** normalize, rephrase, expand abbreviations, or change capitalization. Preserve the original surface form exactly.
@@ -113,7 +113,6 @@ Extract clinically meaningful entities and relationships from the clinical case 
 <Entity_types>
 [{entity_types}]
 
-{recognized_entities_section}
 <Input Text>
 ```
 {input_text}
@@ -142,7 +141,6 @@ Based on the last extraction task, identify and extract any **missed or incorrec
 <Entity_types>
 [{entity_types}]
 
-{recognized_entities_section}
 <Input Text>
 ```
 {input_text}

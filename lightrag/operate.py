@@ -56,7 +56,6 @@ from lightrag.multimodal import (
     build_image_augmented_query,
     describe_images_with_refinement,
 )
-from lightrag.kg.ner import recognize_entities
 from lightrag.constants import (
     GRAPH_FIELD_SEP,
     DEFAULT_MAX_ENTITY_TOKENS,
@@ -2954,18 +2953,6 @@ async def extract_entities(
         # Create cache keys collector for batch processing
         cache_keys_collector = []
 
-        # Run NER to recognize entities and use as context for LLM extraction
-        recognized_entities_str, _ = await recognize_entities(
-            content,
-            entity_types,
-            threshold=0.3
-        )
-        # Format recognized entities section for prompt (only include if entities found)
-        if recognized_entities_str:
-            recognized_entities_section = f"<Recognized_Entities_from_NER>\n{recognized_entities_str}\n</Recognized_Entities_from_NER>\n"
-        else:
-            recognized_entities_section = ""
-
         # Get initial extraction
         # Format system prompt without input_text for each chunk (enables OpenAI prompt caching across chunks)
         entity_extraction_system_prompt = PROMPTS[
@@ -2973,11 +2960,11 @@ async def extract_entities(
         ].format(**context_base)
         # Format user prompts with input_text for each chunk
         entity_extraction_user_prompt = PROMPTS["entity_extraction_user_prompt"].format(
-            **{**context_base, "input_text": content, "recognized_entities_section": recognized_entities_section}
+            **{**context_base, "input_text": content}
         )
         entity_continue_extraction_user_prompt = PROMPTS[
             "entity_continue_extraction_user_prompt"
-        ].format(**{**context_base, "input_text": content, "recognized_entities_section": recognized_entities_section})
+        ].format(**{**context_base, "input_text": content})
 
         final_result, timestamp = await use_llm_func_with_cache(
             entity_extraction_user_prompt,
