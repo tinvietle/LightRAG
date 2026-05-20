@@ -156,14 +156,16 @@ relation{tuple_delimiter}ring-enhancing lesion{tuple_delimiter}brain abscess{tup
 """
 
 PROMPTS["entity_extraction_user_prompt"] = """---Task---
-Extract clinically meaningful entities and relationships from the clinical case text in Data to be Processed below.
+Extract clinically meaningful entities and relationships from the input text below.
 
 ---Instructions---
-1.  **Strict Adherence to Format:** Strictly adhere to all format requirements for entity and relationship lists, including output order, field delimiters, and exact-match entity naming rules, as specified in the system prompt.
-2.  **Output Content Only:** Output *only* the extracted list of entities and relationships. Do not include any introductory or concluding remarks, explanations, or additional text before or after the list.
-3.  **Completion Signal:** Output `{completion_delimiter}` as the final line after all relevant entities and relationships have been extracted and presented.
-4.  **Output Language:** Ensure the output language is {language}.
-5.  **Exact-Match Extraction:** For `entity_name`, `source_entity`, and `target_entity`, copy the exact text span from the input text. Do not normalize to canonical terminology.
+1. Follow the system prompt exactly.
+2. Output only valid `entity` lines, then valid `relation` lines, then `{completion_delimiter}` on the final line.
+3. Do not output commentary, markdown, JSON, bullets, headings, or explanations.
+4. For `entity_name`, `source_entity`, and `target_entity`, copy the exact text span from the input text.
+5. Do not normalize, translate, expand abbreviations, or paraphrase those fields.
+6. Keep entity and relation descriptions short, factual, and text-grounded.
+7. Ensure the output language is {language}.
 
 ---Data to be Processed---
 <Entity_types>
@@ -178,20 +180,20 @@ Extract clinically meaningful entities and relationships from the clinical case 
 """
 
 PROMPTS["entity_continue_extraction_user_prompt"] = """---Task---
-Based on the last extraction task, identify and extract any **missed or incorrectly formatted** clinically meaningful entities and relationships from the input text.
+Based on the last extraction task, output only missed or corrected clinically meaningful entities and relationships from the same input text.
 
 ---Instructions---
-1.  **Strict Adherence to System Format:** Strictly adhere to all format requirements for entity and relationship lists, including output order, field delimiters, and exact-match entity naming rules, as specified in the system instructions.
-2.  **Focus on Corrections/Additions:**
-    *   **Do NOT** re-output entities and relationships that were **correctly and fully** extracted in the last task.
-    *   If a clinically significant entity or relationship was **missed** in the last task, extract and output it now according to the system format.
-    *   If an entity or relationship was **truncated, had missing fields, or was otherwise incorrectly formatted** in the last task, re-output the *corrected and complete* version in the specified format.
-3.  **Output Format - Entities:** Output a total of 4 fields for each entity, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `entity`.
-4.  **Output Format - Relationships:** Output a total of 5 fields for each relationship, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `relation`.
-5.  **Output Content Only:** Output *only* the extracted list of entities and relationships. Do not include any introductory or concluding remarks, explanations, or additional text before or after the list.
-6.  **Completion Signal:** Output `{completion_delimiter}` as the final line after all relevant missing or corrected entities and relationships have been extracted and presented.
-7.  **Output Language:** Ensure the output language is {language}.
-8.  **Exact-Match Extraction:** For corrected or added entities/relations, ensure `entity_name`, `source_entity`, and `target_entity` are exact text matches from the input text.
+1. Follow the system prompt exactly.
+2. Do not re-output any entity or relation that was already correct and complete.
+3. Output only:
+   - entities or relations that were missed
+   - entities or relations that were truncated, malformed, or otherwise incorrect and now need a corrected full version
+4. Output only valid `entity` lines, then valid `relation` lines, then `{completion_delimiter}` on the final line.
+5. Do not output commentary, markdown, JSON, bullets, headings, or explanations.
+6. For corrected or added entities and relations, copy `entity_name`, `source_entity`, and `target_entity` exactly from the input text.
+7. Do not normalize, translate, expand abbreviations, or paraphrase those fields.
+8. Keep entity and relation descriptions short, factual, and text-grounded.
+9. Ensure the output language is {language}.
 
 ---Data to be Processed---
 <Entity_types>
@@ -215,17 +217,20 @@ A patient with Type 2 Diabetes Mellitus presented with fever and productive coug
 ```
 
 <Output>
-entity{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}Disease_disorder{tuple_delimiter}Community-Acquired Pneumonia is the primary diagnosis in this case, characterized by fever, productive cough, and right lower lobe consolidation on chest X-ray.
-entity{tuple_delimiter}Streptococcus Pneumoniae{tuple_delimiter}Pathogen{tuple_delimiter}Streptococcus pneumoniae is a Gram-positive diplococcus identified as the causative pathogen of community-acquired pneumonia in this patient, confirmed by blood culture.
-entity{tuple_delimiter}Fever{tuple_delimiter}Sign_symptom{tuple_delimiter}High-grade fever is a presenting symptom of community-acquired pneumonia in this patient.
-entity{tuple_delimiter}Right Lower Lobe Consolidation{tuple_delimiter}Lab_value{tuple_delimiter}Right lower lobe consolidation is the imaging finding shown on chest X-ray, consistent with bacterial lobar pneumonia.
-entity{tuple_delimiter}Chest X-Ray{tuple_delimiter}Diagnostic_procedure{tuple_delimiter}Chest X-ray is the diagnostic imaging procedure that revealed right lower lobe consolidation.
-entity{tuple_delimiter}Blood Culture{tuple_delimiter}Lab_test{tuple_delimiter}Blood culture is the microbiological test that confirmed Streptococcus pneumoniae infection.
-entity{tuple_delimiter}Amoxicillin-Clavulanate{tuple_delimiter}Medication{tuple_delimiter}Amoxicillin-clavulanate is the antibiotic started to treat community-acquired pneumonia in this patient.
-relation{tuple_delimiter}Streptococcus Pneumoniae{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}causes{tuple_delimiter}Streptococcus pneumoniae was confirmed by blood culture as the causative organism of community-acquired pneumonia in this patient.
-relation{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}Fever{tuple_delimiter}characterized_by{tuple_delimiter}High-grade fever is a systemic inflammatory response to pneumococcal pneumonia.
-relation{tuple_delimiter}Right Lower Lobe Consolidation{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}indicates{tuple_delimiter}Right lower lobe consolidation on chest X-ray confirms the anatomical location and extent of pneumonia.
-relation{tuple_delimiter}Amoxicillin-Clavulanate{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}treats{tuple_delimiter}Amoxicillin-clavulanate was initiated as empirical antibiotic treatment for community-acquired pneumonia before culture results were available.
+entity{tuple_delimiter}Type 2 Diabetes Mellitus{tuple_delimiter}Disease_disorder{tuple_delimiter}Type 2 Diabetes Mellitus is a pre-existing disease mentioned in the text.
+entity{tuple_delimiter}fever{tuple_delimiter}Sign_symptom{tuple_delimiter}fever is a presenting symptom described in the text.
+entity{tuple_delimiter}productive cough{tuple_delimiter}Sign_symptom{tuple_delimiter}productive cough is a presenting respiratory symptom described in the text.
+entity{tuple_delimiter}Chest X-ray{tuple_delimiter}Diagnostic_procedure{tuple_delimiter}Chest X-ray is the diagnostic imaging procedure that showed right lower lobe consolidation.
+entity{tuple_delimiter}right lower lobe consolidation{tuple_delimiter}Lab_value{tuple_delimiter}right lower lobe consolidation is the imaging finding reported on Chest X-ray.
+entity{tuple_delimiter}Blood culture{tuple_delimiter}Lab_test{tuple_delimiter}Blood culture is the laboratory test that confirmed Streptococcus pneumoniae.
+entity{tuple_delimiter}Streptococcus pneumoniae{tuple_delimiter}Pathogen{tuple_delimiter}Streptococcus pneumoniae is the pathogen confirmed by Blood culture.
+entity{tuple_delimiter}Amoxicillin-clavulanate{tuple_delimiter}Medication{tuple_delimiter}Amoxicillin-clavulanate is the medication started for community-acquired pneumonia.
+entity{tuple_delimiter}community-acquired pneumonia{tuple_delimiter}Disease_disorder{tuple_delimiter}community-acquired pneumonia is the condition for which Amoxicillin-clavulanate was started.
+relation{tuple_delimiter}community-acquired pneumonia{tuple_delimiter}fever{tuple_delimiter}characterized_by{tuple_delimiter}The text states that community-acquired pneumonia presented with fever.
+relation{tuple_delimiter}community-acquired pneumonia{tuple_delimiter}productive cough{tuple_delimiter}characterized_by{tuple_delimiter}The text states that community-acquired pneumonia presented with productive cough.
+relation{tuple_delimiter}right lower lobe consolidation{tuple_delimiter}community-acquired pneumonia{tuple_delimiter}indicates{tuple_delimiter}The text links right lower lobe consolidation on Chest X-ray to community-acquired pneumonia.
+relation{tuple_delimiter}Streptococcus pneumoniae{tuple_delimiter}community-acquired pneumonia{tuple_delimiter}causes{tuple_delimiter}Blood culture confirmed Streptococcus pneumoniae as the pathogen associated with community-acquired pneumonia.
+relation{tuple_delimiter}Amoxicillin-clavulanate{tuple_delimiter}community-acquired pneumonia{tuple_delimiter}treats{tuple_delimiter}The text states that Amoxicillin-clavulanate was started for community-acquired pneumonia.
 {completion_delimiter}
 
 """,
