@@ -207,7 +207,7 @@ Based on the last extraction task, identify and extract any **missed or incorrec
 
 PROMPTS["entity_extraction_examples"] = [
     """<Entity_types>
-["Disease", "Symptom", "Drug", "Procedure", "LabTest", "LabFinding", "Anatomy", "Pathogen", "RiskFactor", "ClinicalSign", "Allergy", "Complication", "MedicalDevice", "Specialty", "Other"]
+["Disease_disorder", "Pathogen", "Medication", "Anatomical_location", "Diagnostic_procedure", "Therapeutic_procedure", "Biological_structure", "Clinical_event", "Organism", "Sign_symptom", "Date", "Lab_test", "Lab_value", "Transmission_vector"]
 
 <Input Text>
 ```
@@ -215,13 +215,13 @@ A patient with Type 2 Diabetes Mellitus presented with fever and productive coug
 ```
 
 <Output>
-entity{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}Disease{tuple_delimiter}Community-Acquired Pneumonia is the primary diagnosis in this case, characterized by fever, productive cough, pleuritic chest pain, and right lower lobe consolidation on chest X-ray.
+entity{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}Disease_disorder{tuple_delimiter}Community-Acquired Pneumonia is the primary diagnosis in this case, characterized by fever, productive cough, and right lower lobe consolidation on chest X-ray.
 entity{tuple_delimiter}Streptococcus Pneumoniae{tuple_delimiter}Pathogen{tuple_delimiter}Streptococcus pneumoniae is a Gram-positive diplococcus identified as the causative pathogen of community-acquired pneumonia in this patient, confirmed by blood culture.
-entity{tuple_delimiter}Fever{tuple_delimiter}Symptom{tuple_delimiter}High-grade fever (39.5°C) is a presenting symptom of community-acquired pneumonia, present for 5 days in this patient.
-entity{tuple_delimiter}Right Lower Lobe Consolidation{tuple_delimiter}LabFinding{tuple_delimiter}Right lower lobe consolidation is a radiological finding on chest X-ray indicating airspace disease consistent with bacterial lobar pneumonia.
-entity{tuple_delimiter}Chest X-Ray{tuple_delimiter}Procedure{tuple_delimiter}Chest X-ray is an imaging procedure performed in this patient that revealed right lower lobe consolidation, supporting the diagnosis of pneumonia.
-entity{tuple_delimiter}Blood Culture{tuple_delimiter}Procedure{tuple_delimiter}Blood culture is a microbiological procedure performed in this patient that confirmed Streptococcus pneumoniae bacteremia two days after admission.
-entity{tuple_delimiter}Amoxicillin-Clavulanate{tuple_delimiter}Drug{tuple_delimiter}Amoxicillin-clavulanate is a beta-lactam/beta-lactamase inhibitor combination antibiotic prescribed empirically for community-acquired pneumonia in this patient.
+entity{tuple_delimiter}Fever{tuple_delimiter}Sign_symptom{tuple_delimiter}High-grade fever is a presenting symptom of community-acquired pneumonia in this patient.
+entity{tuple_delimiter}Right Lower Lobe Consolidation{tuple_delimiter}Lab_value{tuple_delimiter}Right lower lobe consolidation is the imaging finding shown on chest X-ray, consistent with bacterial lobar pneumonia.
+entity{tuple_delimiter}Chest X-Ray{tuple_delimiter}Diagnostic_procedure{tuple_delimiter}Chest X-ray is the diagnostic imaging procedure that revealed right lower lobe consolidation.
+entity{tuple_delimiter}Blood Culture{tuple_delimiter}Lab_test{tuple_delimiter}Blood culture is the microbiological test that confirmed Streptococcus pneumoniae infection.
+entity{tuple_delimiter}Amoxicillin-Clavulanate{tuple_delimiter}Medication{tuple_delimiter}Amoxicillin-clavulanate is the antibiotic started to treat community-acquired pneumonia in this patient.
 relation{tuple_delimiter}Streptococcus Pneumoniae{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}causes{tuple_delimiter}Streptococcus pneumoniae was confirmed by blood culture as the causative organism of community-acquired pneumonia in this patient.
 relation{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}Fever{tuple_delimiter}characterized_by{tuple_delimiter}High-grade fever is a systemic inflammatory response to pneumococcal pneumonia.
 relation{tuple_delimiter}Right Lower Lobe Consolidation{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}indicates{tuple_delimiter}Right lower lobe consolidation on chest X-ray confirms the anatomical location and extent of pneumonia.
