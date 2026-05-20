@@ -8,95 +8,151 @@ PROMPTS: dict[str, Any] = {}
 PROMPTS["DEFAULT_TUPLE_DELIMITER"] = "<|#|>"
 PROMPTS["DEFAULT_COMPLETION_DELIMITER"] = "<|COMPLETE|>"
 
-PROMPTS["generate_image_description"] = """You are a precise image analyst.
+PROMPTS["generate_image_description"] = """You are a medical image content extractor.
 
-Describe only what is visibly present in the image. Include objects, text, diagrams, tables, charts, labels, numbers, layout, and notable spatial relationships.
+Describe only medically relevant visible content from the image in short factual sentences.
 
-Do not guess hidden intent, clinical meaning, or other unsupported details. Return a concise but complete factual description."""
+Focus on:
+- visible anatomy
+- visible lesions, masses, collections, edema, bleeding, fracture, obstruction, deformity, or abnormal signal/density
+- visible devices, tubes, catheters, drains, clips, sutures, or implants only if clinically relevant
+- visible procedures or operative findings only if clearly shown
+- visible labels, annotations, arrows, measurements, or modality text
+- image modality or view if visible (for example MRI, CT, X-ray, ultrasound, operative photo)
 
-PROMPTS["refine_image_description"] = """You are a strict validator.
+Do not describe generic photography details, composition, color aesthetics, lighting, background, zoom, framing, or non-medical objects unless clinically relevant.
+Do not speculate about diagnosis, mechanism, intent, or hidden findings.
+Do not describe every object in the image.
+If the image has little or no clear medical content, say that briefly.
 
-Re-examine the image and the initial report below. Correct any hallucinations, remove unsupported claims, and add only visibly supported missing details.
+Return 3 to 8 short lines, plain text only."""
 
-Keep the response concise and factual.
+PROMPTS["refine_image_description"] = """You are a strict medical relevance filter.
 
-INITIAL_REPORT:
+Re-examine the image and the draft description below.
+Keep only concise, medically useful, visibly supported facts.
+
+Rules:
+- remove generic scene description
+- remove speculative or inferred diagnosis
+- remove low-value visual details
+- keep visible anatomy, abnormalities, devices, procedure findings, labels, measurements, and modality/view
+- prefer precise medical wording when clearly supported
+- if uncertain, describe the visible finding without over-interpreting it
+- keep the final result short and clinically useful for downstream entity extraction
+
+DRAFT_DESCRIPTION:
 {initial_output}
 
-REFINED_REPORT:"""
+Return 3 to 8 short lines, plain text only."""
+
+# PROMPTS["entity_extraction_system_prompt"] = """---Role---
+#   You extract a medical knowledge graph from clinical or biomedical text.
+
+#   ---Instructions---
+#   1. Extract only clinically meaningful entities and relations that are explicitly supported by the input text.
+#   2. Focus on medically relevant content such as diseases, symptoms, clinical signs, laboratory findings, pathogens, anatomy, drugs, procedures, tests, measurements, and relevant risk
+#   factors.
+#   3. Ignore non-clinical or low-value details such as routine logistics, generic administration, or incidental workflow text unless they are medically relevant.
+
+#   4. Copy `entity_name`, `source_entity`, and `target_entity` exactly as they appear in the input text.
+#   5. Do not normalize, translate, expand abbreviations, change capitalization, or paraphrase those fields.
+#   6. Use only the provided entity types: `{entity_types}`.
+#   7. If none apply, use `Other`.
+
+#   8. Each entity must be output on one line in this exact format:
+#   `entity{tuple_delimiter}entity_name{tuple_delimiter}entity_type{tuple_delimiter}entity_description`
+
+#   9. Entity descriptions must be short, factual, and based only on the input text.
+#   10. Include clinically relevant details when explicitly stated, such as severity, stage, laterality, onset, dosage, or test value.
+
+#   11. Create relations only between extracted entities.
+#   12. If one statement implies multiple pairwise relations, decompose it into separate binary relations.
+#   `identified_by`, `confirms`, `equivalent_to`
+#   14. Do not invent any relationship keyword outside this list.
+#   15. Keep relation direction clinically sensible and directly supported by the text.
+
+#   16. Each relation must be output on one line in this exact format:
+#   `relation{tuple_delimiter}source_entity{tuple_delimiter}target_entity{tuple_delimiter}relationship_keywords{tuple_delimiter}relationship_description`
+
+#   17. Relation descriptions must be short, factual, and based only on the input text.
+#   22. If no valid entities or relations are found, output only `{completion_delimiter}`.
+
+#   23. `{tuple_delimiter}` is an atomic field separator. Use it only to separate fields.
+#   24. Output only valid extraction lines and the final `{completion_delimiter}`.
+#   25. Do not output commentary, markdown, JSON, bullets, headings, or explanatory text.
+#   entity{tuple_delimiter}amoxicillin-clavulanate{tuple_delimiter}Drug{tuple_delimiter}amoxicillin-clavulanate is the antibiotic started for treatment.
+#   relation{tuple_delimiter}amoxicillin-clavulanate{tuple_delimiter}community-acquired pneumonia{tuple_delimiter}treats{tuple_delimiter}The text states that amoxicillin-clavulanate was
+#   started for community-acquired pneumonia.
+#   {completion_delimiter}
+#   """
 
 PROMPTS["entity_extraction_system_prompt"] = """---Role---
-You are a Clinical Data Specialist responsible for extracting high-signal, clinically meaningful entities and relationships from medical case notes to build a Knowledge Graph optimized for tropical disease prediction and diagnostic reasoning.
+You extract a medical knowledge graph from clinical or biomedical text, including short medical image descriptions.
 
 ---Instructions---
-1.  **Entity Extraction & Output:**
-    *   **Predictive Relevance Filter**: Identify ONLY entities that directly influence a clinical diagnosis or predict patient outcomes. Focus strictly on diseases, symptoms, clinical signs, laboratory results, pathogens, and pre-existing risk factors. You must IGNORE procedural logistics (e.g., "patient was transferred"), medical equipment (e.g., "18G needle", "face mask"), routine hygiene (e.g., "sterile gloves"), and incidental hospital administration details.
+1. Extract only clinically meaningful entities and relations that are explicitly supported by the input text.
+2. Focus on high-value medical content such as:
+- diseases and diagnoses
+- symptoms and clinical signs
+- anatomy and anatomical locations
+- lesions, collections, masses, edema, hemorrhage, infarct, abscess, consolidation, thrombosis, and other abnormal findings
+- pathogens
+- drugs and treatments
+- procedures and tests
+- devices or operative findings only when clinically relevant
+- measurements, labeled findings, and risk factors
 
-    *   **Identification:** Identify clearly defined and clinically meaningful entities in the input text.
-    *   **Entity Details:** For each identified entity, extract the following information:
-        *   `entity_name`: The exact text span of the entity as it appears in the input text. Do **not** normalize, rephrase, expand abbreviations, or change capitalization. Preserve the original surface form exactly.
-        *   `entity_type`: Categorize the entity using one of the following types: `{entity_types}`. If none of the provided types apply, classify it as `Other`.
-        *   `entity_description`: Provide a concise yet comprehensive clinical description of the entity's attributes, clinical significance, and role within the case, based *solely* on the information present in the input text. Include relevant clinical details such as severity, stage, onset, laterality, or dosage where applicable.
-    *   **Output Format - Entities:** Output a total of 4 fields for each entity, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `entity`.
-        *   Format: `entity{tuple_delimiter}entity_name{tuple_delimiter}entity_type{tuple_delimiter}entity_description`
+3. Ignore low-value visual or narrative noise such as:
+- generic scene wording like close-up, image, photo, view, background, lighting, color, layout
+- incidental instruments or materials unless clinically relevant
+- repeated descriptive filler
+- unsupported interpretation from outside knowledge
 
-2.  **Relationship Extraction & Output:**
-  *   **Identification:** Identify direct, clearly stated, and clinically meaningful relationships between previously extracted entities (e.g., a disease is characterized by a symptom, a drug treats a condition, a lab finding indicates a pathophysiological process).
-    *   **N-ary Relationship Decomposition:** If a single clinical statement describes a relationship involving more than two entities (e.g., "metformin and sitagliptin were both prescribed for Type 2 Diabetes Mellitus"), decompose it into multiple binary relationship pairs (e.g., "Metformin treats Type 2 Diabetes Mellitus" and "Sitagliptin treats Type 2 Diabetes Mellitus").
-    *   **Relationship Details:** For each binary relationship, extract the following fields:
-        *   `source_entity`: The exact text span of the source entity as it appears in the input text, and it must exactly match an extracted `entity_name`.
-        *   `target_entity`: The exact text span of the target entity as it appears in the input text, and it must exactly match an extracted `entity_name`.
-        *   `relationship_keywords`: One high-level clinical keyword summarizing the nature or theme of the relationship. You must choose EXACTLY ONE relation from the following keywords: `causes`, `complicates`, `treats`, `indicates`, `characterized_by`, `risk_factor_for`, `complication_of`, `contraindicated_with`, `associated_with`, `monitored_by`, `influences`, `identified_by`, `confirms`, `equivalent_to`. Do not invent or use any relationship keywords outside of this provided list.
-        *   `relationship_description`: A concise clinical explanation of the nature of the relationship between the source and target entities, providing clear clinical rationale for their connection.
-    *   **Output Format - Relationships:** Output a total of 5 fields for each relationship, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `relation`.
-        *   Format: `relation{tuple_delimiter}source_entity{tuple_delimiter}target_entity{tuple_delimiter}relationship_keywords{tuple_delimiter}relationship_description`
+4. Copy `entity_name`, `source_entity`, and `target_entity` exactly as they appear in the input text.
+5. Do not normalize, translate, expand abbreviations, change capitalization, or paraphrase those fields.
+6. Use only the provided entity types: `{entity_types}`.
+7. If none apply, use `Other`.
 
-3.  **Delimiter Usage Protocol:**
-    *   The `{tuple_delimiter}` is a complete, atomic marker and **must not be filled with content**. It serves strictly as a field separator.
-    *   **Incorrect Example:** `entity{tuple_delimiter}Metformin<|drug|>Metformin is an oral anti-diabetic agent.`
-    *   **Correct Example:** `entity{tuple_delimiter}Metformin{tuple_delimiter}drug{tuple_delimiter}Metformin is an oral biguanide anti-diabetic agent used as first-line therapy for Type 2 Diabetes Mellitus.`
+8. Each entity must be output on one line in this exact format:
+`entity{tuple_delimiter}entity_name{tuple_delimiter}entity_type{tuple_delimiter}entity_description`
 
-  4.  **Exact-Match Entity Naming Rule:**
-    *   Every `entity_name`, `source_entity`, and `target_entity` must be copied from the input text exactly as written.
-    *   If the same concept appears in multiple surface forms (e.g., abbreviation vs full name), treat each distinct surface form as a separate entity unless the text explicitly equates them.
-    
-  5. *   **Qualifier Handling**: Clinical modifiers should NOT be embedded in entity names. Instead:
-    - If the modifier is a standalone concept (e.g., "recurrent", "acute"), extract it as a separate `Qualifier` entity and link via `characterized_by`.
-    - If it's descriptive only, include it in `entity_description` or `relationship_description`.
-    
-    Example: 
-    Input: "recurrent right-sided pleural effusions"
-    - Extract entities: "pleural effusions" (ClinicalFinding), "recurrent" (Qualifier), "right-sided" (Qualifier)
-    - Relations: (pleural effusions)--[characterized_by]-->(recurrent), (pleural effusions)--[characterized_by]-->(right-sided)
+9. Entity descriptions must be short, factual, and text-grounded.
+10. Prefer the most clinically informative entities rather than every visible object.
 
-  6.  **Relationship Direction & Duplication:**
-    *   Always extract relationships in the **clinical causal/logical direction**, not the grammatical direction. For example, if the text states "Metformin was prescribed for Type 2 Diabetes Mellitus", extract the relationship as `Metformin treats Type 2 Diabetes Mellitus`, not the reverse.
-    *   Predicate Direction Reference: 
-        - `causes`, `complicates`, `treats`, `risk_factor_for`, `indicates`, `confirms`, `influences`: Extract exactly as written. Source = clinical cause/agent. Target = effect/outcome.
-        - `complication_of`, `characterized_by`, `monitored_by`, `identified_by`: *Normalize to active form* by flipping direction. Example: `"pleural effusion complication_of LVHF"` → source: `left ventricular heart failure`, predicate: `complicates`, target: `pleural effusion`.
-        - `associated_with`, `contraindicated_with`: Bidirectional; Use standard clinical convention: `Drug → Condition` or `Risk Factor → Disease`.
-        - `equivalent_to`: Symmetric; output in any order but be consistent across all equivalent pairs.
+11. Create relations only between extracted entities.
+12. If one statement implies multiple pairwise relations, split it into separate binary relations.
+13. Use only one relationship keyword per relation, chosen from this list:
+`causes`, `complicates`, `treats`, `indicates`, `characterized_by`, `risk_factor_for`, `complication_of`, `contraindicated_with`, `associated_with`, `monitored_by`, `influences`, `identified_by`, `confirms`, `equivalent_to`
+14. Do not invent any relationship keyword outside this list.
+15. Keep relation direction clinically sensible and directly supported by the text.
 
-  7.  **Output Order & Prioritization:**
-    *   Output all extracted entities first, followed by all extracted relationships.
-    *   Within relationships, prioritize and output those most clinically significant to the case first (e.g., primary diagnosis–treatment relationships before incidental findings).
+16. Each relation must be output on one line in this exact format:
+`relation{tuple_delimiter}source_entity{tuple_delimiter}target_entity{tuple_delimiter}relationship_keywords{tuple_delimiter}relationship_description`
 
-  8.  **Context & Objectivity:**
-    *   Ensure all entity names and descriptions are written in the **third person**, using objective clinical language.
-    *   Explicitly name the subject; **avoid using pronouns** or vague references such as "the patient", "this drug", or "our findings" without naming the entity.
-    *   Do not infer or fabricate clinical information not explicitly stated in the input text.
-    *   Only extract relationships that are explicitly stated or clearly supported by the text.
+17. Relation descriptions must be short, factual, and text-grounded.
+18. Do not infer unsupported entities or relations from outside knowledge.
 
-  9.  **Language & Proper Nouns:**
-    *   The entire output (entity names, keywords, and descriptions) must be written in `{language}`.
-    *   Standard medical Latin/Greek terms (e.g., drug generic names, anatomical terms) should be retained in their accepted international form even if the output language differs.
+19. When the input includes image-derived text:
+- prefer abnormal findings over generic visual terms
+- prefer clinically relevant anatomy over broad scene labels
+- extract devices or operative findings only if they matter medically
+- do not create entities such as close-up, image, picture, surgical field, or generic instrument names unless they are clinically important in context
 
-  10.  **Completion Signal:** Output the literal string `{completion_delimiter}` only after all entities and relationships, following all criteria, have been completely extracted and outputted.
+20. Output all entity lines first.
+21. Then output all relation lines.
+22. Then output `{completion_delimiter}` on its own final line.
+23. If no valid entities or relations are found, output only `{completion_delimiter}`.
 
-11.  **Instruction Priority:** If any example appears to conflict with these instructions, follow these instructions, especially the exact-match entity naming rule.
+24. `{tuple_delimiter}` is an atomic field separator. Use it only to separate fields.
+25. Output only valid extraction lines and the final `{completion_delimiter}`.
+26. Do not output commentary, markdown, bullets, JSON, headings, or explanatory text.
 
----Examples---
-{examples}
+---Example---
+entity{tuple_delimiter}brain abscess{tuple_delimiter}Disease{tuple_delimiter}brain abscess is the abnormal finding described in the text.
+entity{tuple_delimiter}ring-enhancing lesion{tuple_delimiter}LabFinding{tuple_delimiter}ring-enhancing lesion is the visible imaging abnormality described in the text.
+relation{tuple_delimiter}ring-enhancing lesion{tuple_delimiter}brain abscess{tuple_delimiter}indicates{tuple_delimiter}The text states that the ring-enhancing lesion supports the presence of brain abscess.
+{completion_delimiter}
 """
 
 PROMPTS["entity_extraction_user_prompt"] = """---Task---
@@ -155,95 +211,21 @@ PROMPTS["entity_extraction_examples"] = [
 
 <Input Text>
 ```
-A 58-year-old male with a 15-year history of Type 2 Diabetes Mellitus and hypertension presented to the emergency department with a 3-day history of progressive dyspnea, orthopnea, and bilateral leg swelling. On examination, he was found to have elevated jugular venous pressure, bilateral basal crepitations, and pitting edema to the knees. His BNP level was 1,850 pg/mL. Echocardiography revealed an ejection fraction of 30%. He was diagnosed with acute decompensated heart failure. He was started on intravenous furosemide and his home metformin was withheld due to risk of lactic acidosis.
-```
-
-<Output>
-entity{tuple_delimiter}Type 2 Diabetes Mellitus{tuple_delimiter}Disease{tuple_delimiter}Type 2 Diabetes Mellitus is a chronic metabolic disorder present in this patient for 15 years, characterized by insulin resistance and relative insulin deficiency.
-entity{tuple_delimiter}Hypertension{tuple_delimiter}Disease{tuple_delimiter}Hypertension is a chronic condition present in this patient, representing a known risk factor for heart failure and cardiovascular disease.
-entity{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}Disease{tuple_delimiter}Acute Decompensated Heart Failure is the primary diagnosis in this case, presenting with progressive dyspnea, orthopnea, bilateral leg edema, elevated BNP, and reduced ejection fraction of 30%.
-entity{tuple_delimiter}Dyspnea{tuple_delimiter}Symptom{tuple_delimiter}Dyspnea is a cardinal symptom of acute decompensated heart failure, progressive over 3 days in this patient.
-entity{tuple_delimiter}Orthopnea{tuple_delimiter}Symptom{tuple_delimiter}Orthopnea is shortness of breath when lying flat, present in this patient and consistent with elevated left atrial filling pressure in heart failure.
-entity{tuple_delimiter}Bilateral Leg Swelling{tuple_delimiter}Symptom{tuple_delimiter}Bilateral leg swelling is a symptom of fluid overload and right-sided heart failure, present over 3 days in this patient.
-entity{tuple_delimiter}Elevated Jugular Venous Pressure{tuple_delimiter}ClinicalSign{tuple_delimiter}Elevated jugular venous pressure is a clinical sign of elevated right-sided filling pressures, identified on examination and consistent with heart failure.
-entity{tuple_delimiter}Bilateral Basal Crepitations{tuple_delimiter}ClinicalSign{tuple_delimiter}Bilateral basal crepitations are lung auscultation findings indicating pulmonary edema, consistent with acute decompensated heart failure.
-entity{tuple_delimiter}Pitting Edema{tuple_delimiter}ClinicalSign{tuple_delimiter}Pitting edema to the knees is a clinical sign of significant peripheral fluid retention, present in this patient with acute decompensated heart failure.
-entity{tuple_delimiter}BNP{tuple_delimiter}LabTest{tuple_delimiter}B-type Natriuretic Peptide (BNP) is a cardiac biomarker used to assess degree of ventricular wall stress; this patient's level was markedly elevated at 1,850 pg/mL.
-entity{tuple_delimiter}BNP 1850 pg/mL{tuple_delimiter}LabFinding{tuple_delimiter}BNP level of 1,850 pg/mL is markedly elevated, strongly supporting the diagnosis of acute decompensated heart failure.
-entity{tuple_delimiter}Echocardiography{tuple_delimiter}Procedure{tuple_delimiter}Echocardiography is a cardiac imaging procedure performed in this patient, revealing a reduced ejection fraction of 30%.
-entity{tuple_delimiter}Ejection Fraction 30%{tuple_delimiter}LabFinding{tuple_delimiter}An ejection fraction of 30% indicates severely reduced left ventricular systolic function, consistent with heart failure with reduced ejection fraction (HFrEF).
-entity{tuple_delimiter}Furosemide{tuple_delimiter}Drug{tuple_delimiter}Furosemide is a loop diuretic administered intravenously to promote diuresis and reduce fluid overload in this patient with acute decompensated heart failure.
-entity{tuple_delimiter}Metformin{tuple_delimiter}Drug{tuple_delimiter}Metformin is an oral biguanide anti-diabetic agent used for Type 2 Diabetes Mellitus that was withheld in this patient due to the risk of lactic acidosis in the setting of acute heart failure.
-entity{tuple_delimiter}Lactic Acidosis{tuple_delimiter}Complication{tuple_delimiter}Lactic acidosis is a serious metabolic complication associated with metformin use in states of hemodynamic compromise, prompting its withholding in this patient.
-relation{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}Dyspnea{tuple_delimiter}characterized_by{tuple_delimiter}Dyspnea is a primary presenting symptom of acute decompensated heart failure in this patient.
-relation{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}Orthopnea{tuple_delimiter}characterized_by{tuple_delimiter}Orthopnea reflects elevated pulmonary venous pressures in acute decompensated heart failure.
-relation{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}Bilateral Leg Swelling{tuple_delimiter}characterized_by{tuple_delimiter}Bilateral leg swelling reflects systemic venous congestion due to right-sided heart failure.
-relation{tuple_delimiter}BNP 1850 pg/mL{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}indicates{tuple_delimiter}The markedly elevated BNP level directly supports the diagnosis of acute decompensated heart failure.
-relation{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}Ejection Fraction 30%{tuple_delimiter}characterized_by{tuple_delimiter}An ejection fraction of 30% establishes heart failure with reduced ejection fraction in this patient.
-relation{tuple_delimiter}Furosemide{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}treats{tuple_delimiter}Intravenous furosemide was administered to relieve fluid overload in acute decompensated heart failure.
-relation{tuple_delimiter}Metformin{tuple_delimiter}Lactic Acidosis{tuple_delimiter}risk_factor_for{tuple_delimiter}Metformin carries a risk of lactic acidosis, particularly in hemodynamically compromised states such as acute heart failure.
-relation{tuple_delimiter}Metformin{tuple_delimiter}Type 2 Diabetes Mellitus{tuple_delimiter}treats{tuple_delimiter}Metformin is a standard first-line oral agent for Type 2 Diabetes Mellitus but was withheld due to the current acute illness.
-relation{tuple_delimiter}Hypertension{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}risk_factor_for{tuple_delimiter}Long-standing hypertension is a major risk factor for the development of heart failure.
-relation{tuple_delimiter}Type 2 Diabetes Mellitus{tuple_delimiter}Acute Decompensated Heart Failure{tuple_delimiter}risk_factor_for{tuple_delimiter}Type 2 Diabetes Mellitus is an established risk factor for cardiovascular disease including heart failure.
-{completion_delimiter}
-
-""",
-    """<Entity_types>
-["Disease", "Symptom", "Drug", "Procedure", "LabTest", "LabFinding", "Anatomy", "Pathogen", "RiskFactor", "ClinicalSign", "Allergy", "Complication", "MedicalDevice", "Specialty", "Other"]
-
-<Input Text>
-```
-A 34-year-old female presented with a 5-day history of high-grade fever, productive cough with rusty sputum, and right-sided pleuritic chest pain. She had no significant past medical history and denied any drug allergies. Examination revealed a temperature of 39.5°C, reduced breath sounds, and dullness to percussion over the right lower lobe. Chest X-ray demonstrated right lower lobe consolidation. Sputum Gram stain showed Gram-positive diplococci. Blood cultures were sent. She was diagnosed with community-acquired pneumonia and started on amoxicillin-clavulanate. A diagnosis of Streptococcus pneumoniae infection was confirmed from blood culture results two days later.
+A patient with Type 2 Diabetes Mellitus presented with fever and productive cough. Chest X-ray showed right lower lobe consolidation. Blood culture confirmed Streptococcus pneumoniae. Amoxicillin-clavulanate was started for community-acquired pneumonia.
 ```
 
 <Output>
 entity{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}Disease{tuple_delimiter}Community-Acquired Pneumonia is the primary diagnosis in this case, characterized by fever, productive cough, pleuritic chest pain, and right lower lobe consolidation on chest X-ray.
 entity{tuple_delimiter}Streptococcus Pneumoniae{tuple_delimiter}Pathogen{tuple_delimiter}Streptococcus pneumoniae is a Gram-positive diplococcus identified as the causative pathogen of community-acquired pneumonia in this patient, confirmed by blood culture.
 entity{tuple_delimiter}Fever{tuple_delimiter}Symptom{tuple_delimiter}High-grade fever (39.5°C) is a presenting symptom of community-acquired pneumonia, present for 5 days in this patient.
-entity{tuple_delimiter}Productive Cough With Rusty Sputum{tuple_delimiter}Symptom{tuple_delimiter}A productive cough with rusty-colored sputum is a classic symptom associated with pneumococcal pneumonia.
-entity{tuple_delimiter}Pleuritic Chest Pain{tuple_delimiter}Symptom{tuple_delimiter}Right-sided pleuritic chest pain is a symptom indicating pleural irritation, consistent with lobar pneumonia involving the right lower lobe.
 entity{tuple_delimiter}Right Lower Lobe Consolidation{tuple_delimiter}LabFinding{tuple_delimiter}Right lower lobe consolidation is a radiological finding on chest X-ray indicating airspace disease consistent with bacterial lobar pneumonia.
-entity{tuple_delimiter}Reduced Breath Sounds{tuple_delimiter}ClinicalSign{tuple_delimiter}Reduced breath sounds over the right lower lobe is a clinical auscultation finding consistent with consolidation or pleural effusion.
-entity{tuple_delimiter}Dullness To Percussion{tuple_delimiter}ClinicalSign{tuple_delimiter}Dullness to percussion over the right lower lobe indicates increased density in the lung parenchyma or pleural space, consistent with consolidation.
 entity{tuple_delimiter}Chest X-Ray{tuple_delimiter}Procedure{tuple_delimiter}Chest X-ray is an imaging procedure performed in this patient that revealed right lower lobe consolidation, supporting the diagnosis of pneumonia.
-entity{tuple_delimiter}Sputum Gram Stain{tuple_delimiter}Procedure{tuple_delimiter}Sputum Gram stain is a microbiological procedure revealing Gram-positive diplococci, consistent with Streptococcus pneumoniae infection.
 entity{tuple_delimiter}Blood Culture{tuple_delimiter}Procedure{tuple_delimiter}Blood culture is a microbiological procedure performed in this patient that confirmed Streptococcus pneumoniae bacteremia two days after admission.
 entity{tuple_delimiter}Amoxicillin-Clavulanate{tuple_delimiter}Drug{tuple_delimiter}Amoxicillin-clavulanate is a beta-lactam/beta-lactamase inhibitor combination antibiotic prescribed empirically for community-acquired pneumonia in this patient.
-entity{tuple_delimiter}Right Lower Lobe{tuple_delimiter}Anatomy{tuple_delimiter}The right lower lobe of the lung is the anatomical site of consolidation in this patient's pneumonia.
 relation{tuple_delimiter}Streptococcus Pneumoniae{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}causes{tuple_delimiter}Streptococcus pneumoniae was confirmed by blood culture as the causative organism of community-acquired pneumonia in this patient.
 relation{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}Fever{tuple_delimiter}characterized_by{tuple_delimiter}High-grade fever is a systemic inflammatory response to pneumococcal pneumonia.
-relation{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}Productive Cough With Rusty Sputum{tuple_delimiter}characterized_by{tuple_delimiter}Rusty sputum production is a hallmark symptom of pneumococcal lobar pneumonia.
 relation{tuple_delimiter}Right Lower Lobe Consolidation{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}indicates{tuple_delimiter}Right lower lobe consolidation on chest X-ray confirms the anatomical location and extent of pneumonia.
 relation{tuple_delimiter}Amoxicillin-Clavulanate{tuple_delimiter}Community-Acquired Pneumonia{tuple_delimiter}treats{tuple_delimiter}Amoxicillin-clavulanate was initiated as empirical antibiotic treatment for community-acquired pneumonia before culture results were available.
-relation{tuple_delimiter}Sputum Gram Stain{tuple_delimiter}Streptococcus Pneumoniae{tuple_delimiter}indicates{tuple_delimiter}The sputum Gram stain showing Gram-positive diplococci provided the initial microbiological clue to Streptococcus pneumoniae infection.
-{completion_delimiter}
-
-""",
-    """<Entity_types>
-["Disease", "Symptom", "Drug", "Procedure", "LabTest", "LabFinding", "Anatomy", "Pathogen", "RiskFactor", "ClinicalSign", "Allergy", "Complication", "MedicalDevice", "Specialty", "Other"]
-
-<Input Text>
-```
-A 72-year-old male with a history of chronic kidney disease stage 3b and atrial fibrillation on warfarin presented with sudden-onset left-sided weakness and facial droop lasting 45 minutes that self-resolved. An MRI of the brain showed no acute infarct. He was diagnosed with a transient ischemic attack. His INR on admission was 1.2, subtherapeutic for atrial fibrillation. The neurology team was consulted and recommended switching to apixaban for better stroke prophylaxis.
-```
-
-<Output>
-entity{tuple_delimiter}Transient Ischemic Attack{tuple_delimiter}Disease{tuple_delimiter}Transient Ischemic Attack (TIA) is the primary diagnosis, presenting with sudden-onset left-sided weakness and facial droop lasting 45 minutes that self-resolved, with no acute infarct on MRI.
-entity{tuple_delimiter}Chronic Kidney Disease Stage 3b{tuple_delimiter}Disease{tuple_delimiter}Chronic Kidney Disease Stage 3b is a comorbid condition in this patient, relevant to drug dosing and choice of anticoagulation.
-entity{tuple_delimiter}Atrial Fibrillation{tuple_delimiter}Disease{tuple_delimiter}Atrial Fibrillation is a pre-existing cardiac arrhythmia and the primary indication for anticoagulation in this patient; it represents the likely cardioembolic source of the TIA.
-entity{tuple_delimiter}Left-Sided Weakness{tuple_delimiter}Symptom{tuple_delimiter}Sudden-onset left-sided weakness is a focal neurological deficit that presented during this patient's TIA episode.
-entity{tuple_delimiter}Facial Droop{tuple_delimiter}Symptom{tuple_delimiter}Facial droop is a focal neurological sign of corticobulbar tract involvement, present during the TIA episode.
-entity{tuple_delimiter}Warfarin{tuple_delimiter}Drug{tuple_delimiter}Warfarin is an oral vitamin K antagonist anticoagulant that the patient was taking for atrial fibrillation prior to admission; however, his INR was subtherapeutic at 1.2.
-entity{tuple_delimiter}Apixaban{tuple_delimiter}Drug{tuple_delimiter}Apixaban is a direct oral anticoagulant (DOAC) factor Xa inhibitor recommended by neurology to replace warfarin for improved stroke prophylaxis in atrial fibrillation.
-entity{tuple_delimiter}MRI Brain{tuple_delimiter}Procedure{tuple_delimiter}MRI of the brain is an imaging procedure performed in this patient that showed no acute infarct, supporting the clinical diagnosis of TIA rather than completed ischemic stroke.
-entity{tuple_delimiter}INR 1.2{tuple_delimiter}LabFinding{tuple_delimiter}An INR of 1.2 is subtherapeutic for stroke prophylaxis in atrial fibrillation (target INR 2.0–3.0), indicating inadequate anticoagulation with warfarin at the time of the TIA.
-entity{tuple_delimiter}Neurology{tuple_delimiter}Specialty{tuple_delimiter}Neurology is the medical specialty consulted in this case for management of TIA and anticoagulation optimization.
-relation{tuple_delimiter}Atrial Fibrillation{tuple_delimiter}Transient Ischemic Attack{tuple_delimiter}causes{tuple_delimiter}Atrial fibrillation is the likely cardioembolic source of this patient's TIA due to subtherapeutic anticoagulation.
-relation{tuple_delimiter}Warfarin{tuple_delimiter}INR 1.2{tuple_delimiter}monitored_by{tuple_delimiter}INR of 1.2 reflects subtherapeutic warfarin anticoagulation, failing to achieve stroke prevention targets.
-relation{tuple_delimiter}Apixaban{tuple_delimiter}Atrial Fibrillation{tuple_delimiter}treats{tuple_delimiter}Apixaban was recommended as a superior oral anticoagulant for stroke prevention in atrial fibrillation compared to subtherapeutic warfarin.
-relation{tuple_delimiter}Transient Ischemic Attack{tuple_delimiter}Left-Sided Weakness{tuple_delimiter}characterized_by{tuple_delimiter}Left-sided weakness was a transient focal deficit resulting from temporary cerebral ischemia in this TIA.
-relation{tuple_delimiter}MRI Brain{tuple_delimiter}Transient Ischemic Attack{tuple_delimiter}confirms{tuple_delimiter}Absence of acute infarct on MRI brain supports the diagnosis of TIA rather than completed ischemic stroke.
-relation{tuple_delimiter}Chronic Kidney Disease Stage 3b{tuple_delimiter}Apixaban{tuple_delimiter}influences{tuple_delimiter}Chronic Kidney Disease Stage 3b requires consideration of renal dosing adjustments when prescribing apixaban.
 {completion_delimiter}
 
 """,
