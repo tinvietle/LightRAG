@@ -82,12 +82,7 @@ def _format_ner_entities(entities: list[dict]) -> str:
     lines = []
     for ent in entities:
         entity_text = ent.get("text", "")
-        entity_label = ent.get("label", "")
-        entity_score = ent.get("score", 0.0)
-        
-        # Format: entity<|>text<|>label<|>confidence_score
-        line = f"entity<|>{entity_text}<|>{entity_label}<|>score:{entity_score:.2f}"
-        lines.append(line)
+        lines.append(f"- {entity_text}")
     
     return "\n".join(lines)
 
@@ -95,7 +90,7 @@ def _format_ner_entities(entities: list[dict]) -> str:
 async def recognize_entities(
     text: str,
     labels: list[str],
-    threshold: float = 0.5,
+    threshold: float = 0.9,
 ) -> tuple[str, list[dict]]:
     """
     Recognize entities in text using GLiNER.
