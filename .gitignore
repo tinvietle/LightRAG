@@ -23,6 +23,7 @@ dist/
 build/
 site/
 next_step/
+dataset/
 
 # Logs / Reports
 *.log

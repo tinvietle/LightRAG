@@ -31,45 +31,39 @@ Results are saved to: lightrag/evaluation/results/
     - results_YYYYMMDD_HHMMSS.json  (Full results with details)
 
 Technical Notes:
-    - Uses stable RAGAS API (LangchainLLMWrapper) for maximum compatibility
-    - Supports custom OpenAI-compatible endpoints via EVAL_LLM_BINDING_HOST
-    - Enables bypass_n mode for endpoints that don't support 'n' parameter
+    - Uses native Ollama clients for evaluation LLM and embeddings
+    - Reuses EVAL_* environment variables for host/model compatibility
+    - Normalizes OpenAI-style /v1 hosts to Ollama native hosts automatically
     - Deprecation warnings are suppressed for cleaner output
 """
 
 import argparse
 import asyncio
+import base64
 import csv
 import json
 import math
 import os
 import sys
 import time
-import warnings
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
 import httpx
+from ollama import AsyncClient as OllamaAsyncClient
+from ollama import Client as OllamaClient
 from dotenv import load_dotenv
 from lightrag.utils import logger
+from langchain_core.outputs import Generation, LLMResult
+from ragas.embeddings.base import BaseRagasEmbeddings
+from ragas.llms.base import BaseRagasLLM
+from ragas.run_config import RunConfig
 
-# Suppress LangchainLLMWrapper deprecation warning
-# We use LangchainLLMWrapper for stability and compatibility with all RAGAS versions
-warnings.filterwarnings(
-    "ignore",
-    message=".*LangchainLLMWrapper is deprecated.*",
-    category=DeprecationWarning,
-)
-
-# Suppress token usage warning for custom OpenAI-compatible endpoints
-# Custom endpoints (vLLM, SGLang, etc.) often don't return usage information
-# This is non-critical as token tracking is not required for RAGAS evaluation
-warnings.filterwarnings(
-    "ignore",
-    message=".*Unexpected type for token usage.*",
-    category=UserWarning,
-)
+if TYPE_CHECKING:
+    from langchain_core.callbacks import Callbacks
+    from langchain_core.prompt_values import PromptValue
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -89,8 +83,6 @@ try:
         ContextRecall,
         Faithfulness,
     )
-    from ragas.llms import LangchainLLMWrapper
-    from langchain_openai import ChatOpenAI, OpenAIEmbeddings
     from tqdm.auto import tqdm
 
     RAGAS_AVAILABLE = True
@@ -99,17 +91,204 @@ except ImportError:
     RAGAS_AVAILABLE = False
     Dataset = None
     evaluate = None
-    LangchainLLMWrapper = None
 
 
-CONNECT_TIMEOUT_SECONDS = 180.0
-READ_TIMEOUT_SECONDS = 300.0
-TOTAL_TIMEOUT_SECONDS = 180.0
+CONNECT_TIMEOUT_SECONDS = 360.0
+READ_TIMEOUT_SECONDS = 360.0
+TOTAL_TIMEOUT_SECONDS = 360.0
+MAX_QUERY_IMAGES = 10
 
 
 def _is_nan(value: Any) -> bool:
     """Return True when value is a float NaN."""
     return isinstance(value, float) and math.isnan(value)
+
+
+def _normalize_ollama_host(host: str | None) -> str:
+    """Convert OpenAI-style Ollama hosts to the native Ollama base URL."""
+    normalized_host = (host or os.getenv("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
+    if normalized_host.endswith("/v1"):
+        return normalized_host[:-3]
+    return normalized_host
+
+
+def _parse_ollama_think(value: str | None) -> bool | str:
+    """Parse native Ollama think mode from environment."""
+    normalized_value = (value or "").strip().lower()
+    if not normalized_value:
+        return False
+    if normalized_value in {"0", "false", "no", "off"}:
+        return False
+    if normalized_value in {"1", "true", "yes", "on"}:
+        return True
+    if normalized_value in {"low", "medium", "high"}:
+        return normalized_value
+    logger.warning(
+        "Invalid EVAL_OLLAMA_THINK=%s. Falling back to think=False.",
+        value,
+    )
+    return False
+
+
+def _extract_ollama_content(response: Any) -> str:
+    """Read assistant content from an Ollama chat response."""
+    message = getattr(response, "message", None)
+    if message is None and isinstance(response, dict):
+        message = response.get("message", {})
+    if isinstance(message, dict):
+        return str(message.get("content", ""))
+    return str(getattr(message, "content", ""))
+
+
+def _extract_ollama_done_reason(response: Any) -> str | None:
+    """Read finish metadata from an Ollama chat response."""
+    done_reason = getattr(response, "done_reason", None)
+    if done_reason is not None:
+        return str(done_reason)
+    if isinstance(response, dict):
+        done_reason = response.get("done_reason")
+        if done_reason is not None:
+            return str(done_reason)
+    return None
+
+
+def _extract_ollama_embeddings(response: Any) -> List[List[float]]:
+    """Read embedding vectors from an Ollama embed response."""
+    embeddings = getattr(response, "embeddings", None)
+    if embeddings is None and isinstance(response, dict):
+        embeddings = response.get("embeddings")
+    if embeddings is None:
+        raise ValueError("Ollama embed response did not include embeddings")
+    return [list(vector) for vector in embeddings]
+
+
+@dataclass(kw_only=True)
+class OllamaRagasLLM(BaseRagasLLM):
+    """Minimal native Ollama wrapper for RAGAS."""
+
+    model: str
+    host: str
+    timeout: int
+    think: bool | str = False
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.sync_client = OllamaClient(host=self.host, timeout=self.timeout)
+        self.async_client = OllamaAsyncClient(host=self.host, timeout=self.timeout)
+
+    def _chat_options(
+        self,
+        temperature: float,
+        stop: List[str] | None,
+    ) -> Dict[str, Any]:
+        options: Dict[str, Any] = {"temperature": temperature}
+        if stop:
+            options["stop"] = stop
+        return options
+
+    def _prompt_to_text(self, prompt: "PromptValue") -> str:
+        return prompt.to_string()
+
+    def _build_result(self, responses: List[Any]) -> LLMResult:
+        return LLMResult(
+            generations=[
+                [
+                    Generation(
+                        text=_extract_ollama_content(response),
+                        generation_info={
+                            "finish_reason": _extract_ollama_done_reason(response)
+                            or "stop"
+                        },
+                    )
+                    for response in responses
+                ]
+            ]
+        )
+
+    def generate_text(
+        self,
+        prompt: "PromptValue",
+        n: int = 1,
+        temperature: float = 0.01,
+        stop: List[str] | None = None,
+        callbacks: "Callbacks" = None,
+    ) -> LLMResult:
+        prompt_text = self._prompt_to_text(prompt)
+        responses = [
+            self.sync_client.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt_text}],
+                stream=False,
+                think=self.think,
+                options=self._chat_options(temperature=temperature, stop=stop),
+            )
+            for _ in range(n)
+        ]
+        return self._build_result(responses)
+
+    async def agenerate_text(
+        self,
+        prompt: "PromptValue",
+        n: int = 1,
+        temperature: float | None = 0.01,
+        stop: List[str] | None = None,
+        callbacks: "Callbacks" = None,
+    ) -> LLMResult:
+        prompt_text = self._prompt_to_text(prompt)
+        responses = []
+        effective_temperature = 0.01 if temperature is None else temperature
+        for _ in range(n):
+            response = await self.async_client.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt_text}],
+                stream=False,
+                think=self.think,
+                options=self._chat_options(
+                    temperature=effective_temperature,
+                    stop=stop,
+                ),
+            )
+            responses.append(response)
+        return self._build_result(responses)
+
+    def is_finished(self, response: LLMResult) -> bool:
+        valid_finish_reasons = {"stop", "STOP", "eos_token", "load"}
+        for generation_group in response.generations:
+            for generation in generation_group:
+                finish_reason = None
+                if generation.generation_info is not None:
+                    finish_reason = generation.generation_info.get("finish_reason")
+                if finish_reason is not None and finish_reason not in valid_finish_reasons:
+                    return False
+        return True
+
+
+class OllamaNativeEmbeddings(BaseRagasEmbeddings):
+    """Minimal native Ollama embedding wrapper for RAGAS."""
+
+    def __init__(self, model: str, host: str, timeout: int):
+        super().__init__()
+        self.model = model
+        self.host = host
+        self.timeout = timeout
+        self.sync_client = OllamaClient(host=self.host, timeout=self.timeout)
+        self.async_client = OllamaAsyncClient(host=self.host, timeout=self.timeout)
+
+    def embed_query(self, text: str) -> List[float]:
+        response = self.sync_client.embed(model=self.model, input=[text])
+        return _extract_ollama_embeddings(response)[0]
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        response = self.sync_client.embed(model=self.model, input=texts)
+        return _extract_ollama_embeddings(response)
+
+    async def aembed_query(self, text: str) -> List[float]:
+        response = await self.async_client.embed(model=self.model, input=[text])
+        return _extract_ollama_embeddings(response)[0]
+
+    async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
+        response = await self.async_client.embed(model=self.model, input=texts)
+        return _extract_ollama_embeddings(response)
 
 
 class RAGEvaluator:
@@ -125,16 +304,14 @@ class RAGEvaluator:
                         If None, will try to read from environment or use default
 
         Environment Variables:
-            EVAL_LLM_MODEL: LLM model for evaluation (default: gpt-4o-mini)
-            EVAL_EMBEDDING_MODEL: Embedding model for evaluation (default: text-embedding-3-small)
-            EVAL_LLM_BINDING_API_KEY: API key for LLM (fallback to OPENAI_API_KEY)
-            EVAL_LLM_BINDING_HOST: Custom endpoint URL for LLM (optional)
-            EVAL_EMBEDDING_BINDING_API_KEY: API key for embeddings (fallback: EVAL_LLM_BINDING_API_KEY -> OPENAI_API_KEY)
-            EVAL_EMBEDDING_BINDING_HOST: Custom endpoint URL for embeddings (fallback: EVAL_LLM_BINDING_HOST)
+            EVAL_LLM_MODEL: Ollama chat model for evaluation
+            EVAL_EMBEDDING_MODEL: Ollama embedding model for evaluation
+            EVAL_LLM_BINDING_HOST: Ollama host (OpenAI-style /v1 hosts are normalized)
+            EVAL_EMBEDDING_BINDING_HOST: Ollama embedding host (falls back to EVAL_LLM_BINDING_HOST)
+            EVAL_OLLAMA_THINK: Native Ollama think mode (false, true, low, medium, high)
 
         Raises:
             ImportError: If ragas or datasets packages are not installed
-            EnvironmentError: If EVAL_LLM_BINDING_API_KEY and OPENAI_API_KEY are both not set
         """
         # Validate RAGAS dependencies are installed
         if not RAGAS_AVAILABLE:
@@ -143,73 +320,30 @@ class RAGEvaluator:
                 "Install with: pip install ragas datasets"
             )
 
-        # Configure evaluation LLM (for RAGAS scoring)
-        eval_llm_api_key = os.getenv("EVAL_LLM_BINDING_API_KEY") or os.getenv(
-            "OPENAI_API_KEY"
-        )
-        if not eval_llm_api_key:
-            raise EnvironmentError(
-                "EVAL_LLM_BINDING_API_KEY or OPENAI_API_KEY is required for evaluation. "
-                "Set EVAL_LLM_BINDING_API_KEY to use a custom API key, "
-                "or ensure OPENAI_API_KEY is set."
-            )
-
-        eval_model = os.getenv("EVAL_LLM_MODEL", "gpt-4o-mini")
-        eval_llm_base_url = os.getenv("EVAL_LLM_BINDING_HOST")
-
-        # Configure evaluation embeddings (for RAGAS scoring)
-        # Fallback chain: EVAL_EMBEDDING_BINDING_API_KEY -> EVAL_LLM_BINDING_API_KEY -> OPENAI_API_KEY
-        eval_embedding_api_key = (
-            os.getenv("EVAL_EMBEDDING_BINDING_API_KEY")
-            or os.getenv("EVAL_LLM_BINDING_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
-        )
+        eval_model = os.getenv("EVAL_LLM_MODEL", "gpt-oss:120b-cloud")
         eval_embedding_model = os.getenv(
-            "EVAL_EMBEDDING_MODEL", "text-embedding-3-large"
+            "EVAL_EMBEDDING_MODEL", "qwen3-embedding:0.6b"
         )
-        # Fallback chain: EVAL_EMBEDDING_BINDING_HOST -> EVAL_LLM_BINDING_HOST -> None
-        eval_embedding_base_url = os.getenv("EVAL_EMBEDDING_BINDING_HOST") or os.getenv(
-            "EVAL_LLM_BINDING_HOST"
+        eval_llm_base_url = _normalize_ollama_host(os.getenv("EVAL_LLM_BINDING_HOST"))
+        eval_embedding_base_url = _normalize_ollama_host(
+            os.getenv("EVAL_EMBEDDING_BINDING_HOST") or eval_llm_base_url
         )
+        eval_timeout = int(os.getenv("EVAL_LLM_TIMEOUT", "180"))
+        eval_think = _parse_ollama_think(os.getenv("EVAL_OLLAMA_THINK"))
 
-        # Create LLM and Embeddings instances for RAGAS
-        llm_kwargs = {
-            "model": eval_model,
-            "api_key": eval_llm_api_key,
-            "max_retries": int(os.getenv("EVAL_LLM_MAX_RETRIES", "5")),
-            "request_timeout": int(os.getenv("EVAL_LLM_TIMEOUT", "180")),
-        }
-        embedding_kwargs = {
-            "model": eval_embedding_model,
-            "api_key": eval_embedding_api_key,
-        }
-
-        if eval_llm_base_url:
-            llm_kwargs["base_url"] = eval_llm_base_url
-
-        if eval_embedding_base_url:
-            embedding_kwargs["base_url"] = eval_embedding_base_url
-
-        # Create base LangChain LLM
-        base_llm = ChatOpenAI(**llm_kwargs)
-        self.eval_embeddings = OpenAIEmbeddings(**embedding_kwargs)
-
-        # Wrap LLM with LangchainLLMWrapper and enable bypass_n mode for custom endpoints
-        # This ensures compatibility with endpoints that don't support the 'n' parameter
-        # by generating multiple outputs through repeated prompts instead of using 'n' parameter
-        try:
-            self.eval_llm = LangchainLLMWrapper(
-                langchain_llm=base_llm,
-                bypass_n=True,  # Enable bypass_n to avoid passing 'n' to OpenAI API
-            )
-            logger.debug("Successfully configured bypass_n mode for LLM wrapper")
-        except Exception as e:
-            logger.warning(
-                "Could not configure LangchainLLMWrapper with bypass_n: %s. "
-                "Using base LLM directly, which may cause warnings with custom endpoints.",
-                e,
-            )
-            self.eval_llm = base_llm
+        self.eval_llm = OllamaRagasLLM(
+            model=eval_model,
+            host=eval_llm_base_url,
+            timeout=eval_timeout,
+            think=eval_think,
+            run_config=RunConfig(timeout=eval_timeout),
+        )
+        self.eval_embeddings = OllamaNativeEmbeddings(
+            model=eval_embedding_model,
+            host=eval_embedding_base_url,
+            timeout=eval_timeout,
+        )
+        self.eval_embeddings.set_run_config(RunConfig(timeout=eval_timeout))
 
         if test_dataset_path is None:
             test_dataset_path = Path(__file__).parent / "sample_dataset.json"
@@ -221,6 +355,7 @@ class RAGEvaluator:
         self.rag_api_url = rag_api_url.rstrip("/")
         self.results_dir = Path(__file__).parent / "results"
         self.results_dir.mkdir(exist_ok=True)
+        self.repo_root = Path(__file__).resolve().parents[2]
 
         # Load test dataset
         self.test_cases = self._load_test_dataset()
@@ -230,8 +365,9 @@ class RAGEvaluator:
         self.eval_embedding_model = eval_embedding_model
         self.eval_llm_base_url = eval_llm_base_url
         self.eval_embedding_base_url = eval_embedding_base_url
-        self.eval_max_retries = llm_kwargs["max_retries"]
-        self.eval_timeout = llm_kwargs["request_timeout"]
+        self.eval_max_retries = int(os.getenv("EVAL_LLM_MAX_RETRIES", "5"))
+        self.eval_timeout = eval_timeout
+        self.eval_think = eval_think
 
         # Display configuration
         self._display_configuration()
@@ -243,27 +379,14 @@ class RAGEvaluator:
         logger.info("  • Embedding Model:      %s", self.eval_embedding_model)
 
         # Display LLM endpoint
-        if self.eval_llm_base_url:
-            logger.info("  • LLM Endpoint:         %s", self.eval_llm_base_url)
-            logger.info(
-                "  • Bypass N-Parameter:   Enabled (use LangchainLLMWrapper for compatibility)"
-            )
-        else:
-            logger.info("  • LLM Endpoint:         OpenAI Official API")
+        logger.info("  • LLM Endpoint:         %s", self.eval_llm_base_url)
+        logger.info("  • Ollama Think Mode:    %s", self.eval_think)
 
         # Display Embedding endpoint (only if different from LLM)
-        if self.eval_embedding_base_url:
-            if self.eval_embedding_base_url != self.eval_llm_base_url:
-                logger.info(
-                    "  • Embedding Endpoint:   %s", self.eval_embedding_base_url
-                )
-            # If same as LLM endpoint, no need to display separately
-        elif not self.eval_llm_base_url:
-            # Both using OpenAI - already displayed above
-            pass
-        else:
-            # LLM uses custom endpoint, but embeddings use OpenAI
-            logger.info("  • Embedding Endpoint:   OpenAI Official API")
+        if self.eval_embedding_base_url != self.eval_llm_base_url:
+            logger.info(
+                "  • Embedding Endpoint:   %s", self.eval_embedding_base_url
+            )
 
         logger.info("Concurrency & Rate Limiting:")
         query_top_k = int(os.getenv("EVAL_QUERY_TOP_K", "10"))
@@ -277,20 +400,79 @@ class RAGEvaluator:
         logger.info("  • LightRAG API:         %s", self.rag_api_url)
         logger.info("  • Results Directory:    %s", self.results_dir.name)
 
-    def _load_test_dataset(self) -> List[Dict[str, str]]:
-        """Load test cases from JSON file"""
-        if not self.test_dataset_path.exists():
+    def _resolve_existing_path(self, raw_path: Path | str) -> Path:
+        """Resolve paths relative to the current working directory or repo root."""
+        candidate = Path(raw_path)
+        if candidate.exists():
+            return candidate
+
+        if not candidate.is_absolute():
+            script_candidate = Path(__file__).resolve().parent / candidate
+            if script_candidate.exists():
+                return script_candidate
+
+            repo_candidate = self.repo_root / candidate
+            if repo_candidate.exists():
+                return repo_candidate
+
+        return candidate
+
+    def _resolve_image_path(self, image_path: str) -> Path:
+        """Resolve a dataset image path and fail fast when it is missing."""
+        resolved_path = self._resolve_existing_path(image_path)
+        if not resolved_path.exists():
+            raise FileNotFoundError(
+                f"Image file not found: {image_path} "
+                f"(tried {Path(image_path)} and {self.repo_root / Path(image_path)})"
+            )
+        return resolved_path
+
+    async def _encode_image_paths(self, image_paths: List[str]) -> List[str]:
+        """Read image files from disk and return base64 payloads."""
+        encoded_images: List[str] = []
+        for image_path in image_paths[:MAX_QUERY_IMAGES]:
+            resolved_path = self._resolve_image_path(image_path)
+            image_bytes = await asyncio.to_thread(resolved_path.read_bytes)
+            encoded_images.append(base64.b64encode(image_bytes).decode("utf-8"))
+        return encoded_images
+
+    def _load_test_dataset(self) -> List[Dict[str, Any]]:
+        """Load test cases from JSON file."""
+        dataset_path = self._resolve_existing_path(self.test_dataset_path)
+        if not dataset_path.exists():
             raise FileNotFoundError(f"Test dataset not found: {self.test_dataset_path}")
 
-        with open(self.test_dataset_path) as f:
+        self.test_dataset_path = dataset_path
+
+        with open(dataset_path, encoding="utf-8") as f:
             data = json.load(f)
 
-        return data.get("test_cases", [])
+        if isinstance(data, list):
+            test_cases = data
+        elif isinstance(data, dict):
+            test_cases = data.get("test_cases", [])
+        else:
+            raise ValueError(
+                "Unsupported dataset format. Expected a list or an object with test_cases."
+            )
+
+        normalized_cases: List[Dict[str, Any]] = [
+            case for case in test_cases if isinstance(case, dict)
+        ]
+        if len(normalized_cases) != len(test_cases):
+            logger.warning(
+                "Skipped %s non-object test case entries while loading %s",
+                len(test_cases) - len(normalized_cases),
+                dataset_path,
+            )
+
+        return normalized_cases
 
     async def generate_rag_response(
         self,
         question: str,
         client: httpx.AsyncClient,
+        image_paths: List[str] | None = None,
     ) -> Dict[str, Any]:
         """
         Generate RAG response by calling LightRAG API.
@@ -307,6 +489,9 @@ class RAGEvaluator:
             Exception: If LightRAG API is unavailable.
         """
         try:
+            images = (
+                await self._encode_image_paths(image_paths) if image_paths else []
+            )
             payload = {
                 "query": question,
                 "mode": "mix",
@@ -314,8 +499,10 @@ class RAGEvaluator:
                 "include_chunk_content": True,  # NEW: Request chunk content in references
                 "response_type": "Multiple Paragraphs",
                 "top_k": int(os.getenv("EVAL_QUERY_TOP_K", "10")),
-                "user_prompt": "Start the answer with <disease_name> if the question is about a disease. The disease name should be concise, just the name of the disease without any additional information. Example: Covid-19 \n <Explanation>",
+                "user_prompt": "Start the answer with <disease_name> if the question is about a disease. The disease name should be concise, just the name of the disease without any additional information. Example: Covid-19 \n <Explanation>"
             }
+            if images:
+                payload["images"] = images
 
             # Get API key from environment for authentication
             api_key = os.getenv("LIGHTRAG_API_KEY")
@@ -392,7 +579,7 @@ class RAGEvaluator:
     async def evaluate_single_case(
         self,
         idx: int,
-        test_case: Dict[str, str],
+        test_case: Dict[str, Any],
         rag_semaphore: asyncio.Semaphore,
         eval_semaphore: asyncio.Semaphore,
         client: httpx.AsyncClient,
@@ -421,11 +608,18 @@ class RAGEvaluator:
         async with rag_semaphore:
             question = test_case["question"]
             ground_truth = test_case["ground_truth"]
+            image_paths = test_case.get("image_path") or []
+            if isinstance(image_paths, str):
+                image_paths = [image_paths]
+            elif not isinstance(image_paths, list):
+                image_paths = []
 
             # Stage 1: Generate RAG response
             try:
                 rag_response = await self.generate_rag_response(
-                    question=question, client=client
+                    question=question,
+                    client=client,
+                    image_paths=image_paths,
                 )
             except Exception as e:
                 logger.error("Error generating response for test %s: %s", idx, str(e))
@@ -507,6 +701,8 @@ class RAGEvaluator:
                         if len(ground_truth) > 200
                         else ground_truth,
                         "project": test_case.get("project", "unknown"),
+                        "image_count": len(image_paths),
+                        "image_paths": image_paths,
                         "metrics": {
                             "faithfulness": float(scores_row.get("faithfulness", 0)),
                             "answer_relevance": float(
