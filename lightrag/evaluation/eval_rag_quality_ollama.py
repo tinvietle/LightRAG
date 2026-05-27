@@ -44,6 +44,7 @@ import csv
 import json
 import math
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -97,11 +98,24 @@ CONNECT_TIMEOUT_SECONDS = 360.0
 READ_TIMEOUT_SECONDS = 360.0
 TOTAL_TIMEOUT_SECONDS = 360.0
 MAX_QUERY_IMAGES = 10
+DISEASE_TAG_PATTERN = re.compile(
+    r"<disease_name>\s*(.*?)\s*</disease_name>", re.IGNORECASE | re.DOTALL
+)
+DISEASE_PREFIX_PATTERN = re.compile(
+    r"^(?:predicted\s+)?(?:disease(?:_name)?|diagnosis)\s*[:\-]\s*(.+)$",
+    re.IGNORECASE,
+)
 
 
 def _is_nan(value: Any) -> bool:
-    """Return True when value is a float NaN."""
-    return isinstance(value, float) and math.isnan(value)
+    """Return True when a metric value is missing, NaN, or infinite."""
+    if value is None:
+        return True
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return True
+    return math.isnan(numeric_value) or math.isinf(numeric_value)
 
 
 def _normalize_ollama_host(host: str | None) -> str:
@@ -160,6 +174,60 @@ def _extract_ollama_embeddings(response: Any) -> List[List[float]]:
     if embeddings is None:
         raise ValueError("Ollama embed response did not include embeddings")
     return [list(vector) for vector in embeddings]
+
+
+def _sanitize_metric_value(value: Any) -> float | None:
+    """Convert a metric to a finite float or None."""
+    if _is_nan(value):
+        return None
+    return float(value)
+
+
+def _normalize_disease_name(value: str) -> str:
+    """Normalize the predicted disease label extracted from model output."""
+    cleaned = value.strip()
+    cleaned = cleaned.strip(" \t\r\n:;-")
+    cleaned = cleaned.strip("\"'“”‘’")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned
+
+
+def _extract_predicted_disease(answer: str) -> str:
+    """Extract the disease label from a tagged or prefixed model answer."""
+    if not answer:
+        return ""
+
+    tagged_match = DISEASE_TAG_PATTERN.search(answer)
+    if tagged_match:
+        return _normalize_disease_name(tagged_match.group(1))
+
+    stripped_answer = answer.strip()
+    if not stripped_answer:
+        return ""
+
+    first_line = stripped_answer.splitlines()[0].strip()
+    first_line_tagged = re.match(
+        r"^<\s*disease_name\s*>(.*?)(?:<\s*/\s*disease_name\s*>|$)",
+        first_line,
+        flags=re.IGNORECASE,
+    )
+    if first_line_tagged:
+        return _normalize_disease_name(first_line_tagged.group(1))
+
+    prefix_match = DISEASE_PREFIX_PATTERN.match(first_line)
+    if prefix_match:
+        return _normalize_disease_name(prefix_match.group(1))
+
+    return ""
+
+
+def _format_retrieved_context(contexts: List[str]) -> str:
+    """Render retrieved chunks in a human-readable form."""
+    if not contexts:
+        return ""
+    return "\n\n".join(
+        f"[Context {index}] {context}" for index, context in enumerate(contexts, 1)
+    )
 
 
 @dataclass(kw_only=True)
@@ -494,12 +562,19 @@ class RAGEvaluator:
             )
             payload = {
                 "query": question,
-                "mode": "mix",
+                "mode": "hybrid",
                 "include_references": True,
                 "include_chunk_content": True,  # NEW: Request chunk content in references
                 "response_type": "Multiple Paragraphs",
                 "top_k": int(os.getenv("EVAL_QUERY_TOP_K", "10")),
-                "user_prompt": "Start the answer with <disease_name> if the question is about a disease. The disease name should be concise, just the name of the disease without any additional information. Example: Covid-19 \n <Explanation>"
+                "user_prompt": (
+                    "Answer in this exact format when the question is about a disease:\n"
+                    "<disease_name>DISEASE NAME</disease_name>\n"
+                    "<explanation>FULL EXPLANATION</explanation>\n"
+                    "Put the disease name on the first line, inside the <disease_name> tag, "
+                    "with no text before it. The disease name must be concise and contain only "
+                    "the diagnosis name. Then provide the full explanation below."
+                ),
             }
             if images:
                 payload["images"] = images
@@ -553,7 +628,9 @@ class RAGEvaluator:
 
             return {
                 "answer": answer,
+                "predicted_disease": _extract_predicted_disease(answer),
                 "contexts": contexts,  # List of strings from actual retrieved chunks
+                "retrieved_context": _format_retrieved_context(contexts),
             }
 
         except httpx.ConnectError as e:
@@ -627,6 +704,15 @@ class RAGEvaluator:
                 return {
                     "test_number": idx,
                     "question": question,
+                    "answer": "",
+                    "ground_truth": ground_truth,
+                    "predicted_disease": "",
+                    "retrieved_context": "",
+                    "retrieved_contexts": [],
+                    "missing_metrics": [],
+                    "project": test_case.get("project", "unknown"),
+                    "image_count": len(image_paths),
+                    "image_paths": image_paths,
                     "error": str(e),
                     "metrics": {},
                     "ragas_score": 0,
@@ -635,12 +721,15 @@ class RAGEvaluator:
 
             # *** CRITICAL FIX: Use actual retrieved contexts, NOT ground_truth ***
             retrieved_contexts = rag_response["contexts"]
+            retrieved_context = rag_response["retrieved_context"]
+            predicted_disease = rag_response["predicted_disease"]
+            answer = rag_response["answer"]
 
             # Prepare dataset for RAGAS evaluation with CORRECT contexts
             eval_dataset = Dataset.from_dict(
                 {
                     "question": [question],
-                    "answer": [rag_response["answer"]],
+                    "answer": [answer],
                     "contexts": [retrieved_contexts],
                     "ground_truth": [ground_truth],
                 }
@@ -691,40 +780,54 @@ class RAGEvaluator:
                     scores_row = df.iloc[0]
 
                     # Extract scores (RAGAS v0.3+ uses .to_pandas())
+                    metrics = {
+                        "faithfulness": _sanitize_metric_value(
+                            scores_row.get("faithfulness", 0)
+                        ),
+                        "answer_relevance": _sanitize_metric_value(
+                            scores_row.get("answer_relevancy", 0)
+                        ),
+                        "context_recall": _sanitize_metric_value(
+                            scores_row.get("context_recall", 0)
+                        ),
+                        "context_precision": _sanitize_metric_value(
+                            scores_row.get("context_precision", 0)
+                        ),
+                    }
+                    missing_metrics = [
+                        metric_name
+                        for metric_name, metric_value in metrics.items()
+                        if metric_value is None
+                    ]
+                    valid_metrics = [
+                        value for value in metrics.values() if value is not None
+                    ]
+                    ragas_score = (
+                        sum(valid_metrics) / len(valid_metrics)
+                        if valid_metrics
+                        else None
+                    )
+
                     result = {
                         "test_number": idx,
                         "question": question,
-                        "answer": rag_response["answer"][:200] + "..."
-                        if len(rag_response["answer"]) > 200
-                        else rag_response["answer"],
-                        "ground_truth": ground_truth[:200] + "..."
-                        if len(ground_truth) > 200
-                        else ground_truth,
+                        "answer": answer,
+                        "ground_truth": ground_truth,
+                        "predicted_disease": predicted_disease,
+                        # "retrieved_context": retrieved_context,
+                        "retrieved_contexts": retrieved_contexts,
+                        "missing_metrics": missing_metrics,
                         "project": test_case.get("project", "unknown"),
                         "image_count": len(image_paths),
                         "image_paths": image_paths,
-                        "metrics": {
-                            "faithfulness": float(scores_row.get("faithfulness", 0)),
-                            "answer_relevance": float(
-                                scores_row.get("answer_relevancy", 0)
-                            ),
-                            "context_recall": float(
-                                scores_row.get("context_recall", 0)
-                            ),
-                            "context_precision": float(
-                                scores_row.get("context_precision", 0)
-                            ),
-                        },
+                        "metrics": metrics,
                         "timestamp": datetime.now().isoformat(),
                     }
 
-                    # Calculate RAGAS score (average of all metrics, excluding NaN values)
-                    metrics = result["metrics"]
-                    valid_metrics = [v for v in metrics.values() if not _is_nan(v)]
-                    ragas_score = (
-                        sum(valid_metrics) / len(valid_metrics) if valid_metrics else 0
+                    # Calculate RAGAS score from only the valid metrics.
+                    result["ragas_score"] = (
+                        round(ragas_score, 4) if ragas_score is not None else None
                     )
-                    result["ragas_score"] = round(ragas_score, 4)
 
                     # Update progress counter
                     progress_counter["completed"] += 1
@@ -737,6 +840,15 @@ class RAGEvaluator:
                     return {
                         "test_number": idx,
                         "question": question,
+                        "answer": answer,
+                        "ground_truth": ground_truth,
+                        "predicted_disease": predicted_disease,
+                        "retrieved_context": retrieved_context,
+                        "retrieved_contexts": retrieved_contexts,
+                        "missing_metrics": [],
+                        "project": test_case.get("project", "unknown"),
+                        "image_count": len(image_paths),
+                        "image_paths": image_paths,
                         "error": str(e),
                         "metrics": {},
                         "ragas_score": 0,
@@ -845,7 +957,14 @@ class RAGEvaluator:
             fieldnames = [
                 "test_number",
                 "question",
+                "answer",
+                "ground_truth",
+                "predicted_disease",
+                "retrieved_context",
+                "missing_metrics",
                 "project",
+                "image_count",
+                "image_paths",
                 "faithfulness",
                 "answer_relevance",
                 "context_recall",
@@ -864,20 +983,50 @@ class RAGEvaluator:
                     {
                         "test_number": idx,
                         "question": result.get("question", ""),
+                        "answer": result.get("answer", ""),
+                        "ground_truth": result.get("ground_truth", ""),
+                        "predicted_disease": result.get("predicted_disease", ""),
+                        "retrieved_context": result.get("retrieved_context", ""),
+                        "missing_metrics": json.dumps(
+                            result.get("missing_metrics", []), ensure_ascii=False
+                        ),
                         "project": result.get("project", "unknown"),
-                        "faithfulness": f"{metrics.get('faithfulness', 0):.4f}",
-                        "answer_relevance": f"{metrics.get('answer_relevance', 0):.4f}",
-                        "context_recall": f"{metrics.get('context_recall', 0):.4f}",
-                        "context_precision": f"{metrics.get('context_precision', 0):.4f}",
-                        "ragas_score": f"{result.get('ragas_score', 0):.4f}",
-                        "status": "success" if metrics else "error",
+                        "image_count": result.get("image_count", 0),
+                        "image_paths": json.dumps(
+                            result.get("image_paths", []), ensure_ascii=False
+                        ),
+                        "faithfulness": self._csv_metric(metrics.get("faithfulness")),
+                        "answer_relevance": self._csv_metric(
+                            metrics.get("answer_relevance")
+                        ),
+                        "context_recall": self._csv_metric(
+                            metrics.get("context_recall")
+                        ),
+                        "context_precision": self._csv_metric(
+                            metrics.get("context_precision")
+                        ),
+                        "ragas_score": self._csv_metric(result.get("ragas_score")),
+                        "status": (
+                            "success"
+                            if metrics and not result.get("missing_metrics")
+                            else "partial"
+                            if metrics
+                            else "error"
+                        ),
                         "timestamp": result.get("timestamp", ""),
                     }
                 )
 
         return csv_path
 
-    def _format_metric(self, value: float, width: int = 6) -> str:
+    def _csv_metric(self, value: Any) -> str:
+        """Format a metric for CSV export, preserving missing values."""
+        sanitized = _sanitize_metric_value(value)
+        if sanitized is None:
+            return "N/A"
+        return f"{sanitized:.4f}"
+
+    def _format_metric(self, value: Any, width: int = 6) -> str:
         """
         Format a metric value for display, handling NaN gracefully
 
@@ -888,9 +1037,10 @@ class RAGEvaluator:
         Returns:
             Formatted string (e.g., "0.8523" or "  N/A ")
         """
-        if _is_nan(value):
+        sanitized = _sanitize_metric_value(value)
+        if sanitized is None:
             return "N/A".center(width)
-        return f"{value:.4f}".rjust(width)
+        return f"{sanitized:.4f}".rjust(width)
 
     def _display_results_table(self, results: List[Dict[str, Any]]):
         """
@@ -929,13 +1079,13 @@ class RAGEvaluator:
 
             metrics = result.get("metrics", {})
             if metrics:
-                # Success case - format each metric, handling NaN values
-                faith = metrics.get("faithfulness", 0)
-                ans_rel = metrics.get("answer_relevance", 0)
-                ctx_rec = metrics.get("context_recall", 0)
-                ctx_prec = metrics.get("context_precision", 0)
-                ragas = result.get("ragas_score", 0)
-                status = "✓"
+                # Success/partial case - format each metric, handling missing values.
+                faith = metrics.get("faithfulness")
+                ans_rel = metrics.get("answer_relevance")
+                ctx_rec = metrics.get("context_recall")
+                ctx_prec = metrics.get("context_precision")
+                ragas = result.get("ragas_score")
+                status = "!" if result.get("missing_metrics") else "✓"
 
                 logger.info(
                     "%-4d | %-50s | %s | %s | %s | %s | %s | %6s",
@@ -1005,29 +1155,29 @@ class RAGEvaluator:
         for result in valid_results:
             metrics = result.get("metrics", {})
 
-            # For each metric, sum non-NaN values and count them
-            faithfulness = metrics.get("faithfulness", 0)
-            if not _is_nan(faithfulness):
+            # For each metric, sum only finite values and count them.
+            faithfulness = _sanitize_metric_value(metrics.get("faithfulness"))
+            if faithfulness is not None:
                 metrics_data["faithfulness"]["sum"] += faithfulness
                 metrics_data["faithfulness"]["count"] += 1
 
-            answer_relevance = metrics.get("answer_relevance", 0)
-            if not _is_nan(answer_relevance):
+            answer_relevance = _sanitize_metric_value(metrics.get("answer_relevance"))
+            if answer_relevance is not None:
                 metrics_data["answer_relevance"]["sum"] += answer_relevance
                 metrics_data["answer_relevance"]["count"] += 1
 
-            context_recall = metrics.get("context_recall", 0)
-            if not _is_nan(context_recall):
+            context_recall = _sanitize_metric_value(metrics.get("context_recall"))
+            if context_recall is not None:
                 metrics_data["context_recall"]["sum"] += context_recall
                 metrics_data["context_recall"]["count"] += 1
 
-            context_precision = metrics.get("context_precision", 0)
-            if not _is_nan(context_precision):
+            context_precision = _sanitize_metric_value(metrics.get("context_precision"))
+            if context_precision is not None:
                 metrics_data["context_precision"]["sum"] += context_precision
                 metrics_data["context_precision"]["count"] += 1
 
-            ragas_score = result.get("ragas_score", 0)
-            if not _is_nan(ragas_score):
+            ragas_score = _sanitize_metric_value(result.get("ragas_score"))
+            if ragas_score is not None:
                 metrics_data["ragas_score"]["sum"] += ragas_score
                 metrics_data["ragas_score"]["count"] += 1
 
@@ -1045,9 +1195,9 @@ class RAGEvaluator:
         # Find min and max RAGAS scores (filter out NaN)
         ragas_scores = []
         for r in valid_results:
-            score = r.get("ragas_score", 0)
-            if _is_nan(score):
-                continue  # Skip NaN values
+            score = _sanitize_metric_value(r.get("ragas_score"))
+            if score is None:
+                continue  # Skip missing metric values
             ragas_scores.append(score)
 
         min_score = min(ragas_scores) if ragas_scores else 0
@@ -1094,7 +1244,7 @@ class RAGEvaluator:
             / f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         )
         with open(json_path, "w") as f:
-            json.dump(summary, f, indent=2)
+            json.dump(summary, f, indent=2, allow_nan=False)
 
         # Export to CSV
         csv_path = self._export_to_csv(results)
