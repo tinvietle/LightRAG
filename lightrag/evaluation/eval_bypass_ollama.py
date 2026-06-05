@@ -38,6 +38,13 @@ load_dotenv(dotenv_path=".env", override=False)
 
 
 MAX_QUERY_IMAGES = 10
+DIFFERENTIAL_GUIDELINE = """When diagnosis is being considered, answer in terms of a differential diagnosis.
+- List the most plausible supported diagnoses or syndromes.
+- Explain the evidence supporting each possibility.
+- Note evidence against each possibility when present.
+- Identify missing data needed to discriminate between them.
+- If one diagnosis is more strongly supported, describe it as the leading or most supported possibility, not as a certain conclusion, unless it is explicitly confirmed.
+- Keep directly supported facts separate from conflicting evidence and missing information."""
 
 DISEASE_TAG_PATTERN = re.compile(
     r"<disease_name>\s*(.*?)\s*</disease_name>", re.IGNORECASE | re.DOTALL
@@ -339,6 +346,7 @@ class BypassEvaluator:
                 question = str(test_case.get("question", "")).strip()
                 if not question:
                     raise ValueError(f"Test case {idx} is missing a question")
+                question = f"{DIFFERENTIAL_GUIDELINE}{'=' * 10}\n{question}"
 
                 ground_truth = test_case.get("ground_truth", "")
                 image_paths = self._extract_image_paths(test_case)
