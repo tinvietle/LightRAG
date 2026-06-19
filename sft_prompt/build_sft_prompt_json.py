@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Build an SFT prompt JSON dataset from the CSV source and LightRAG `/query/data`."""
+"""Build an SFT prompt JSON dataset from case JSON files and LightRAG `/query/data`."""
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import sys
 from dataclasses import dataclass
@@ -32,7 +31,7 @@ DEFAULT_SEPARATOR = "=" * 10
 
 @dataclass(slots=True)
 class BuildConfig:
-    csv_path: Path
+    input_dir: Path
     output_path: Path
     base_url: str
     api_key: str | None
@@ -41,6 +40,7 @@ class BuildConfig:
     chunk_top_k: int | None
     timeout: float
     limit: int | None
+    resume: bool
     overwrite: bool
 
 
@@ -50,20 +50,21 @@ class QueryDataError(RuntimeError):
 
 def parse_args() -> BuildConfig:
     script_dir = Path(__file__).resolve().parent
-    default_csv = resolve_default_csv(script_dir)
+    default_input_dir = script_dir / "fold1" / "train"
     default_output = script_dir / "sft.json"
 
     parser = argparse.ArgumentParser(
         description=(
-            "Read the SFT CSV, fetch LightRAG `/query/data` for each case, "
+            "Read case JSON files from a training folder, fetch LightRAG `/query/data` "
+            "for each case, "
             "and write a JSON dataset."
         )
     )
     parser.add_argument(
-        "--csv-path",
+        "--input-dir",
         type=Path,
-        default=default_csv,
-        help="Path to the source CSV file.",
+        default=default_input_dir,
+        help="Path to the source training folder.",
     )
     parser.add_argument(
         "--output-path",
@@ -111,6 +112,12 @@ def parse_args() -> BuildConfig:
         help="Optional row limit for partial runs.",
     )
     parser.add_argument(
+        "--no-resume",
+        action="store_false",
+        dest="resume",
+        help="Do not resume from an existing output JSON file.",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Allow overwriting an existing output JSON file.",
@@ -118,7 +125,7 @@ def parse_args() -> BuildConfig:
     args = parser.parse_args()
 
     return BuildConfig(
-        csv_path=args.csv_path,
+        input_dir=args.input_dir,
         output_path=args.output_path,
         base_url=args.base_url.rstrip("/"),
         api_key=args.api_key,
@@ -127,31 +134,78 @@ def parse_args() -> BuildConfig:
         chunk_top_k=args.chunk_top_k,
         timeout=args.timeout,
         limit=args.limit,
+        resume=args.resume,
         overwrite=args.overwrite,
     )
 
 
-def resolve_default_csv(script_dir: Path) -> Path:
-    csv_candidates = [script_dir / "sft.csv", script_dir / "sft .csv"]
-    for candidate in csv_candidates:
-        if candidate.exists():
-            return candidate
-    return csv_candidates[0]
+def load_rows(input_dir: Path) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
 
+    for json_path in iter_case_files(input_dir):
+        row = load_case_row(json_path, input_dir)
+        if row is None or is_empty_row(row):
+            continue
+        row["id"] = str(len(rows) + 1)
+        rows.append(row)
 
-def load_rows(csv_path: Path) -> list[dict[str, str]]:
-    with csv_path.open("r", encoding="utf-8-sig", newline="") as csv_file:
-        reader = csv.DictReader(csv_file)
-        rows: list[dict[str, str]] = []
-        for row in reader:
-            normalized_row = {
-                (key or "").strip(): (value or "").strip()
-                for key, value in row.items()
-            }
-            if is_empty_row(normalized_row):
-                continue
-            rows.append(normalized_row)
     return rows
+
+
+def iter_case_files(input_dir: Path) -> list[Path]:
+    return sorted(path for path in input_dir.rglob("*.json") if path.is_file())
+
+
+def load_case_row(
+    json_path: Path,
+    input_dir: Path,
+) -> dict[str, str] | None:
+    try:
+        raw_value = json.loads(json_path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in {json_path}: {exc}") from exc
+
+    case_record = extract_case_record(raw_value, json_path)
+    case_id = normalize_string(case_record.get("case_id"))
+    case_text = normalize_string(case_record.get("full_text_cutoff"))
+    if not case_text:
+        return None
+
+    disease_name = resolve_disease_name(json_path, input_dir)
+
+    row = {header: "" for header in CSV_HEADERS}
+    row["file_name"] = json_path.stem
+    row["case_id"] = case_id
+    row["case_text"] = case_text
+    row["sub_folder"] = disease_name
+    return row
+
+
+def extract_case_record(raw_value: Any, json_path: Path) -> dict[str, Any]:
+    if isinstance(raw_value, list):
+        if not raw_value:
+            raise ValueError(f"No case records found in {json_path}")
+        record = raw_value[0]
+    else:
+        record = raw_value
+
+    if not isinstance(record, dict):
+        raise ValueError(f"Expected a JSON object in {json_path}")
+
+    return record
+
+
+def resolve_disease_name(json_path: Path, input_dir: Path) -> str:
+    relative_parts = json_path.relative_to(input_dir).parts
+    return relative_parts[0] if relative_parts else ""
+
+
+def normalize_string(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
 
 
 def is_empty_row(row: dict[str, str]) -> bool:
@@ -262,37 +316,91 @@ def build_output_row(
     return output_row
 
 
+def row_key(row: dict[str, Any]) -> tuple[str, str]:
+    return (
+        normalize_string(row.get("file_name")),
+        normalize_string(row.get("case_id")),
+    )
+
+
+def assign_row_ids(rows: list[dict[str, Any]]) -> None:
+    for index, row in enumerate(rows, start=1):
+        row["id"] = str(index)
+
+
 def validate_headers(rows: list[dict[str, str]]) -> None:
     if not rows:
-        return
+        raise ValueError("No case JSON files were found in the input folder.")
 
     missing_headers = [header for header in CSV_HEADERS if header not in rows[0]]
     if missing_headers:
         missing = ", ".join(missing_headers)
-        raise ValueError(f"CSV is missing required headers: {missing}")
+        raise ValueError(f"Generated rows are missing required headers: {missing}")
 
 
-def write_output(output_path: Path, rows: list[dict[str, Any]], overwrite: bool) -> None:
-    if output_path.exists() and not overwrite:
+def load_existing_output(config: BuildConfig) -> list[dict[str, Any]]:
+    if config.overwrite:
+        return []
+
+    if not config.output_path.exists():
+        return []
+
+    if not config.resume:
         raise FileExistsError(
-            f"Output file already exists: {output_path}. Use --overwrite to replace it."
+            f"Output file already exists: {config.output_path}. "
+            "Use --overwrite to replace it or omit --no-resume to continue."
         )
 
+    try:
+        parsed = json.loads(config.output_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Existing output is not valid JSON: {config.output_path}"
+        ) from exc
+
+    if not isinstance(parsed, list):
+        raise ValueError(f"Existing output must be a JSON array: {config.output_path}")
+
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(parsed, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"Existing output row {index} is not a JSON object: {config.output_path}"
+            )
+        rows.append(dict(item))
+
+    assign_row_ids(rows)
+    return rows
+
+
+def write_output(output_path: Path, rows: list[dict[str, Any]]) -> None:
+    assign_row_ids(rows)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
+    temp_path = output_path.with_suffix(f"{output_path.suffix}.tmp")
+    temp_path.write_text(
         json.dumps(rows, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    temp_path.replace(output_path)
 
 
 def build_dataset(config: BuildConfig) -> list[dict[str, Any]]:
-    rows = load_rows(config.csv_path)
+    rows = load_rows(config.input_dir)
     validate_headers(rows)
 
-    dataset: list[dict[str, Any]] = []
+    dataset = load_existing_output(config)
+    completed_keys = {row_key(row) for row in dataset}
     processed_rows = rows[: config.limit] if config.limit is not None else rows
 
     for index, row in enumerate(processed_rows, start=1):
+        current_key = row_key(row)
+        if current_key in completed_keys:
+            print(
+                f"[{index}/{len(processed_rows)}] Skipping existing case_id={row.get('case_id', '')}",
+                file=sys.stderr,
+            )
+            continue
+
         case_text = row.get("case_text", "")
         api_result: dict[str, Any] | None = None
 
@@ -304,6 +412,8 @@ def build_dataset(config: BuildConfig) -> list[dict[str, Any]]:
             api_result = fetch_query_data(case_text, config)
 
         dataset.append(build_output_row(row, api_result))
+        completed_keys.add(current_key)
+        write_output(config.output_path, dataset)
 
     return dataset
 
@@ -311,13 +421,16 @@ def build_dataset(config: BuildConfig) -> list[dict[str, Any]]:
 def main() -> int:
     config = parse_args()
 
-    if not config.csv_path.exists():
-        print(f"CSV file not found: {config.csv_path}", file=sys.stderr)
+    if not config.input_dir.exists():
+        print(f"Input folder not found: {config.input_dir}", file=sys.stderr)
+        return 1
+
+    if not config.input_dir.is_dir():
+        print(f"Input path is not a folder: {config.input_dir}", file=sys.stderr)
         return 1
 
     try:
         dataset = build_dataset(config)
-        write_output(config.output_path, dataset, overwrite=config.overwrite)
     except (FileExistsError, QueryDataError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
