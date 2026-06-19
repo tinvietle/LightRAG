@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,6 +41,8 @@ class BuildConfig:
     top_k: int | None
     chunk_top_k: int | None
     timeout: float
+    max_retries: int
+    retry_delay: float
     limit: int | None
     resume: bool
     overwrite: bool
@@ -106,6 +110,18 @@ def parse_args() -> BuildConfig:
         help="Request timeout in seconds.",
     )
     parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Number of extra retries after the initial request attempt.",
+    )
+    parser.add_argument(
+        "--retry-delay",
+        type=float,
+        default=5.0,
+        help="Base delay in seconds between retry attempts.",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=None,
@@ -133,6 +149,8 @@ def parse_args() -> BuildConfig:
         top_k=args.top_k,
         chunk_top_k=args.chunk_top_k,
         timeout=args.timeout,
+        max_retries=args.max_retries,
+        retry_delay=args.retry_delay,
         limit=args.limit,
         resume=args.resume,
         overwrite=args.overwrite,
@@ -234,16 +252,42 @@ def fetch_query_data(case_text: str, config: BuildConfig) -> dict[str, Any]:
         method="POST",
     )
 
-    try:
-        with request.urlopen(http_request, timeout=config.timeout) as response:
-            response_body = response.read().decode("utf-8")
-    except error.HTTPError as exc:
-        response_body = exc.read().decode("utf-8", errors="replace")
-        raise QueryDataError(
-            f"HTTP {exc.code} from /query/data: {response_body}"
-        ) from exc
-    except error.URLError as exc:
-        raise QueryDataError(f"Unable to reach /query/data: {exc.reason}") from exc
+    last_error: Exception | None = None
+    total_attempts = max(1, config.max_retries + 1)
+
+    for attempt in range(1, total_attempts + 1):
+        try:
+            with request.urlopen(http_request, timeout=config.timeout) as response:
+                response_body = response.read().decode("utf-8")
+            break
+        except error.HTTPError as exc:
+            response_body = exc.read().decode("utf-8", errors="replace")
+            raise QueryDataError(
+                f"HTTP {exc.code} from /query/data: {response_body}"
+            ) from exc
+        except (TimeoutError, socket.timeout) as exc:
+            last_error = exc
+            if attempt == total_attempts:
+                raise QueryDataError(
+                    f"/query/data timed out after {attempt} attempts "
+                    f"(timeout={config.timeout}s)"
+                ) from exc
+        except error.URLError as exc:
+            last_error = exc
+            if attempt == total_attempts:
+                raise QueryDataError(
+                    f"Unable to reach /query/data after {attempt} attempts: {exc.reason}"
+                ) from exc
+
+        delay_seconds = config.retry_delay * attempt
+        print(
+            f"Request attempt {attempt}/{total_attempts} failed for /query/data; "
+            f"retrying in {delay_seconds:.1f}s",
+            file=sys.stderr,
+        )
+        time.sleep(delay_seconds)
+    else:
+        raise QueryDataError("Request loop exited unexpectedly") from last_error
 
     try:
         parsed = json.loads(response_body)
