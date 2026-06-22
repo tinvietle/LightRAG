@@ -94,13 +94,13 @@ def parse_args() -> BuildConfig:
     parser.add_argument(
         "--top-k",
         type=int,
-        default=20,
+        default=10,
         help="Optional `top_k` value sent to `/query/data`.",
     )
     parser.add_argument(
         "--chunk-top-k",
         type=int,
-        default=10,
+        default=5,
         help="Optional `chunk_top_k` value sent to `/query/data`.",
     )
     parser.add_argument(
@@ -314,8 +314,8 @@ def build_full_prompt(
 ) -> str:
     sections = [
         ("Case Text", case_text),
-        ("Knowledge Graph Entity", context_entity),
-        ("Knowledge Graph Relation", context_relation),
+        # ("Knowledge Graph Entity", context_entity),
+        # ("Knowledge Graph Relation", context_relation),
         ("Knowledge Graph Related Chunks", context_chunks),
     ]
 

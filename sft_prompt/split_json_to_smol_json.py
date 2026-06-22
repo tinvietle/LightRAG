@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract prompt text entries from `sft.json` into per-case text files."""
+"""Split `sft.json` into one JSON file per row."""
 
 from __future__ import annotations
 
@@ -10,14 +10,11 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_TEXT_FIELD = "full_prompt"
-
-
 def parse_args() -> argparse.Namespace:
     script_dir = Path(__file__).resolve().parent
 
     parser = argparse.ArgumentParser(
-        description="Read sft.json and write one .txt file per case into txt/."
+        description="Read sft.json and write one JSON object per file into smol_json/."
     )
     parser.add_argument(
         "--input-path",
@@ -28,13 +25,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=script_dir / "txt",
-        help="Directory where .txt files will be written.",
-    )
-    parser.add_argument(
-        "--text-field",
-        default=DEFAULT_TEXT_FIELD,
-        help="JSON field to extract into each text file.",
+        default=script_dir / "smol_json",
+        help="Directory where per-row JSON files will be written.",
     )
     return parser.parse_args()
 
@@ -64,29 +56,27 @@ def normalize_string(value: Any) -> str:
     return str(value)
 
 
-def write_text_files(
-    rows: list[dict[str, Any]],
-    output_dir: Path,
-    text_field: str,
-) -> int:
+def write_split_files(rows: list[dict[str, Any]], output_dir: Path) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    written_count = 0
+    written = 0
+    seen_names: set[str] = set()
     for index, row in enumerate(rows, start=1):
         file_name = normalize_string(row.get("file_name")).strip()
-        extracted_text = normalize_string(row.get(text_field))
-
         if not file_name:
             raise ValueError(f"Row {index} is missing file_name")
+        if file_name in seen_names:
+            raise ValueError(f"Duplicate file_name in dataset: {file_name}")
 
-        if not extracted_text:
-            raise ValueError(f"Row {index} is missing {text_field}")
+        output_path = output_dir / f"{file_name}.json"
+        output_path.write_text(
+            json.dumps(row, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        seen_names.add(file_name)
+        written += 1
 
-        output_path = output_dir / f"{file_name}.txt"
-        output_path.write_text(extracted_text, encoding="utf-8")
-        written_count += 1
-
-    return written_count
+    return written
 
 
 def main() -> int:
@@ -98,15 +88,12 @@ def main() -> int:
 
     try:
         rows = load_dataset(args.input_path)
-        written_count = write_text_files(rows, args.output_dir, args.text_field)
+        written = write_split_files(rows, args.output_dir)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
-    print(
-        f"Wrote {written_count} text files to {args.output_dir}",
-        file=sys.stderr,
-    )
+    print(f"Wrote {written} JSON files to {args.output_dir}", file=sys.stderr)
     return 0
 
 

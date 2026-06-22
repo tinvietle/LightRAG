@@ -26,6 +26,9 @@ next_step/
 dataset/
 fold1/
 txt/
+sft.json
+reasoning_answer/
+smol_json/
 
 # Logs / Reports
 *.log
