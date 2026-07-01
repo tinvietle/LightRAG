@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_TEXT_FIELD = "full_prompt"
+DEFAULT_TEXT_FIELD = "case_text"
 
 
 def parse_args() -> argparse.Namespace:

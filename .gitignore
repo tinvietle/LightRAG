@@ -29,6 +29,9 @@ txt/
 sft.json
 reasoning_answer/
 smol_json/
+reasoning_answer_rag/
+txt_non_elapsed/
+txt_plain/
 
 # Logs / Reports
 *.log

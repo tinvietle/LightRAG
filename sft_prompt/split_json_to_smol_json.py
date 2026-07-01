@@ -67,6 +67,13 @@ def write_split_files(rows: list[dict[str, Any]], output_dir: Path) -> int:
             raise ValueError(f"Row {index} is missing file_name")
         if file_name in seen_names:
             raise ValueError(f"Duplicate file_name in dataset: {file_name}")
+        
+        reasoning = normalize_string(row.get("reasoning")).strip()
+        answer = normalize_string(row.get("answer")).strip()
+        
+        if not reasoning and not answer:
+            print(f"Warning: Row {index} ({file_name}) has empty reasoning and answer fields, skipping.")
+            continue
 
         output_path = output_dir / f"{file_name}.json"
         output_path.write_text(
