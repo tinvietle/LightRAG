@@ -2,7 +2,9 @@ import importlib
 import sys
 from io import BytesIO
 from pathlib import Path
+from tempfile import SpooledTemporaryFile
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -52,6 +54,13 @@ DocumentManager = _document_routes.DocumentManager
 create_document_routes = _document_routes.create_document_routes
 
 pytestmark = pytest.mark.offline
+
+
+def _make_upload_file(filename: str, content: bytes):
+    file_obj = SpooledTemporaryFile()
+    file_obj.write(content)
+    file_obj.seek(0)
+    return _document_routes.UploadFile(filename=filename, file=file_obj)
 
 
 @pytest.fixture(autouse=True)
@@ -1059,10 +1068,7 @@ async def test_upload_succeeds_concurrent_with_pipeline_busy(tmp_path, monkeypat
         for route in router.routes
         if getattr(route, "name", "") == "upload_to_input_dir"
     ][-1]
-    upload_file = _document_routes.UploadFile(
-        filename="while_busy.docx",
-        file=BytesIO(b"docx bytes"),
-    )
+    upload_file = _make_upload_file("while_busy.docx", b"docx bytes")
 
     bg = _document_routes.BackgroundTasks()
     response = await upload_endpoint(bg, upload_file)
@@ -1149,9 +1155,9 @@ async def test_upload_succeeds_during_scan_processing_phase(tmp_path, monkeypatc
         for route in router.routes
         if getattr(route, "name", "") == "upload_to_input_dir"
     ][-1]
-    upload_file = _document_routes.UploadFile(
-        filename="upload_during_scan_processing.docx",
-        file=BytesIO(b"docx bytes"),
+    upload_file = _make_upload_file(
+        "upload_during_scan_processing.docx",
+        b"docx bytes",
     )
 
     bg = _document_routes.BackgroundTasks()
@@ -1162,6 +1168,152 @@ async def test_upload_succeeds_during_scan_processing_phase(tmp_path, monkeypatc
     assert (tmp_path / "upload_during_scan_processing.docx").exists()
     assert pipeline_status["pending_enqueues"] == 1
     assert len(bg.tasks) == 1
+
+
+async def test_upload_multimodal_case_saves_images_and_schedules_background(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        _document_routes,
+        "global_args",
+        SimpleNamespace(max_upload_size=None, max_multimodal_case_images=5),
+    )
+    doc_manager = DocumentManager(str(tmp_path))
+    rag = _DuplicateUploadRag({})
+    router = create_document_routes(rag, doc_manager)
+    upload_endpoint = [
+        route.endpoint
+        for route in router.routes
+        if getattr(route, "name", "") == "upload_multimodal_case_to_input_dir"
+    ][-1]
+
+    text_file = _make_upload_file("case.txt", b"Patient with fever and rash.")
+    image_one = _make_upload_file("leg-rash.png", b"fake-image-one")
+    image_two = _make_upload_file("cxr.jpg", b"fake-image-two")
+
+    bg = _document_routes.BackgroundTasks()
+    response = await upload_endpoint(bg, text_file, [image_one, image_two])
+
+    assert response.status == "success"
+    assert "2 attached image(s)" in response.message
+    assert (tmp_path / "case.txt").exists()
+    case_image_dir = _document_routes.get_case_image_dir(tmp_path, "case.txt")
+    assert (case_image_dir / "leg-rash.png").exists()
+    assert (case_image_dir / "cxr.jpg").exists()
+    assert len(bg.tasks) == 1
+
+
+async def test_upload_multimodal_case_rejects_too_many_images(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        _document_routes,
+        "global_args",
+        SimpleNamespace(max_upload_size=None, max_multimodal_case_images=1),
+    )
+    doc_manager = DocumentManager(str(tmp_path))
+    rag = _DuplicateUploadRag({})
+    router = create_document_routes(rag, doc_manager)
+    upload_endpoint = [
+        route.endpoint
+        for route in router.routes
+        if getattr(route, "name", "") == "upload_multimodal_case_to_input_dir"
+    ][-1]
+
+    text_file = _make_upload_file("case.txt", b"Patient with cough.")
+    image_one = _make_upload_file("a.png", b"image-a")
+    image_two = _make_upload_file("b.png", b"image-b")
+
+    with pytest.raises(_document_routes.HTTPException) as excinfo:
+        await upload_endpoint(
+            _document_routes.BackgroundTasks(),
+            text_file,
+            [image_one, image_two],
+        )
+    assert excinfo.value.status_code == 400
+    assert "Maximum allowed: 1" in excinfo.value.detail
+    assert not (tmp_path / "case.txt").exists()
+
+
+async def test_pipeline_index_multimodal_case_enriches_text_before_enqueue(tmp_path):
+    case_file = tmp_path / "case.txt"
+    case_file.write_text("Patient with fever and thrombocytopenia.", encoding="utf-8")
+    image_file = tmp_path / "rash.png"
+    image_file.write_bytes(b"image-bytes")
+
+    rag = _FakeRag()
+    rag.vlm_process_enable = True
+    rag.role_llm_funcs = {
+        "vlm": AsyncMock(
+            return_value='{"name":"rash_photo","type":"Photo","description":"Maculopapular rash over both lower limbs"}'
+        )
+    }
+
+    success, returned_track_id = await _document_routes.pipeline_index_multimodal_case(
+        rag,
+        case_file,
+        "track-case",
+        [image_file],
+    )
+
+    assert success is True
+    assert returned_track_id == "track-case"
+    assert rag.enqueued[0]["input"] == [
+        "Patient with fever and thrombocytopenia.\n\n"
+        "Attached image descriptions:\n"
+        "- Maculopapular rash over both lower limbs"
+    ]
+
+
+async def test_background_delete_removes_case_images_when_delete_file_true(tmp_path):
+    shared_storage = importlib.import_module("lightrag.kg.shared_storage")
+    source_file = tmp_path / "case.txt"
+    source_file.write_text("Patient with fever.", encoding="utf-8")
+    case_image_dir = _document_routes.get_case_image_dir(tmp_path, "case.txt")
+    case_image_dir.mkdir(parents=True, exist_ok=True)
+    (case_image_dir / "rash.png").write_bytes(b"image")
+
+    doc_manager = DocumentManager(str(tmp_path))
+    rag = _DeleteRag(
+        DeletionResult(
+            status="success",
+            doc_id="doc-case",
+            message="deleted",
+            file_path="case.txt",
+        )
+    )
+    shared_storage.initialize_share_data()
+    await shared_storage.initialize_pipeline_status(workspace=rag.workspace)
+
+    await _document_routes.background_delete_documents(
+        rag,
+        doc_manager,
+        ["doc-case"],
+        delete_file=True,
+        delete_llm_cache=False,
+    )
+
+    assert not source_file.exists()
+    assert not case_image_dir.exists()
+
+
+async def test_clear_documents_removes_case_image_root(tmp_path):
+    import importlib
+
+    doc_manager = DocumentManager(str(tmp_path))
+    image_root = tmp_path / _document_routes.MULTIMODAL_CASE_IMAGES_DIRNAME
+    image_root.mkdir(parents=True)
+    (image_root / "case-123").mkdir()
+    ((image_root / "case-123") / "rash.png").write_bytes(b"image")
+
+    rag = _ClearRag(chunks_drop_result={"status": "success", "message": "data dropped"})
+
+    shared_storage = importlib.import_module("lightrag.kg.shared_storage")
+    await shared_storage.initialize_pipeline_status(workspace=rag.workspace)
+
+    router = create_document_routes(rag, doc_manager)
+    response = await _clear_endpoint(router)()
+
+    assert response.status == "success"
+    assert not image_root.exists()
 
 
 async def test_scan_endpoint_returns_skipped_when_pipeline_busy(tmp_path):
@@ -1430,13 +1582,13 @@ async def test_two_concurrent_uploads_both_succeed_when_pipeline_busy(
     ][-1]
 
     bg_a = _document_routes.BackgroundTasks()
-    upload_a = _document_routes.UploadFile(filename="a.docx", file=BytesIO(b"a bytes"))
+    upload_a = _make_upload_file("a.docx", b"a bytes")
     response_a = await upload_endpoint(bg_a, upload_a)
     assert response_a.status == "success"
     assert pipeline_status["pending_enqueues"] == 1
 
     bg_b = _document_routes.BackgroundTasks()
-    upload_b = _document_routes.UploadFile(filename="b.docx", file=BytesIO(b"b bytes"))
+    upload_b = _make_upload_file("b.docx", b"b bytes")
     response_b = await upload_endpoint(bg_b, upload_b)
     assert response_b.status == "success"
     # Both reservations coexist while bg tasks are pending.

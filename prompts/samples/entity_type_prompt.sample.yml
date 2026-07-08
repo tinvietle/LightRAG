@@ -2,45 +2,121 @@
 ### When ENTITY_EXTRACTION_USE_JSON=true, entity_extraction_json_examples section must include in this file
 
 entity_types_guidance: |
-  Classify each entity using one of the following types. If no type fits, use `Other`.
+  Classify each clinically relevant entity using one of the following types. These types guide both the extraction prompt and optional GLiNER pre-recognition. Focus on entities that materially affect diagnosis, infectious-disease reasoning, disease transmission, treatment decisions, complications, or patient outcome. If no type fits, use `Other`.
 
-  - Person: Human individuals, real or fictional
-  - Creature: Non-human living beings (animals, mythical beings, etc.)
-  - Organization: Companies, institutions, government bodies, groups
-  - Location: Geographic places (cities, countries, buildings, regions)
-  - Event: Occurrences, incidents, ceremonies, meetings
-  - Concept: Abstract ideas, theories, principles, beliefs
-  - Method: Procedures, techniques, algorithms, workflows
-  - Content: Creative or informational works (books, articles, films, reports)
-  - Data: Quantitative or structured information (statistics, datasets, measurements)
-  - Artifact: Physical or digital objects created by humans (tools, software, devices)
-  - NaturalObject: Natural non-living objects (minerals, celestial bodies, chemical compounds)
+  - Disease_disorder: Diseases, syndromes, diagnoses, injuries, pathological states, and named disorders
+  - Pathogen: Viruses, bacteria, fungi, parasites, and other disease-causing agents
+  - Medication: Drugs, vaccines, biologics, infusions, and named therapeutic substances
+  - Anatomical_location: Body regions, organs, tissues, compartments, and anatomical sites
+  - Diagnostic_procedure: Diagnostic exams, imaging studies, screenings, biopsies, and evaluation procedures
+  - Therapeutic_procedure: Treatments, surgeries, interventions, supportive care, and rehabilitation procedures
+  - Biological_structure: Cells, genes, proteins, receptors, chromosomes, and other biological structures
+  - Clinical_event: Admissions, exposures, transmissions, complications, relapses, and other clinically meaningful events
+  - Organism: Humans, animals, insects, and other living organisms that are not being labeled as pathogens
+  - Sign_symptom: Symptoms, complaints, clinical signs, observed abnormalities, and physical findings
+  - Date: Absolute or relative dates, durations, time windows, and clinically relevant temporal markers
+  - Lab_test: Laboratory tests, panels, biomarkers, cultures, and diagnostic measurements
+  - Lab_value: Numeric or qualitative lab results, thresholds, units, and measured values
+  - Transmission_vector: Mosquitoes, ticks, contaminated sources, or other vectors/mechanisms of disease transmission
+
 entity_extraction_examples:
   - |
-    entity{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>{tuple_delimiter}<entity_description>
-    relation{tuple_delimiter}<source_entity>{tuple_delimiter}<target_entity>{tuple_delimiter}<relationship_keywords>{tuple_delimiter}<relationship_description>
+    <Entity_types>
+    [Disease_disorder, Medication, Sign_symptom, Clinical_event, Lab_test, Lab_value, Diagnostic_procedure, Therapeutic_procedure]
+
+    <Input Text>
+    ```
+    A 72-year-old male with a history of chronic kidney disease stage 3b and atrial fibrillation on warfarin presented with sudden-onset left-sided weakness and facial droop lasting 45 minutes that self-resolved. An MRI of the brain showed no acute infarct. He was diagnosed with a transient ischemic attack. His INR on admission was 1.2, subtherapeutic for atrial fibrillation. The neurology team was consulted and recommended switching to apixaban for better stroke prophylaxis.
+    ```
+
+    <Output>
+    entity{tuple_delimiter}chronic kidney disease stage 3b{tuple_delimiter}Disease_disorder{tuple_delimiter}chronic kidney disease stage 3b is a pre-existing comorbidity that is clinically relevant to anticoagulant choice and dosing in this case.
+    entity{tuple_delimiter}atrial fibrillation{tuple_delimiter}Disease_disorder{tuple_delimiter}atrial fibrillation is a pre-existing arrhythmia and a clinically important embolic risk factor in this case.
+    entity{tuple_delimiter}warfarin{tuple_delimiter}Medication{tuple_delimiter}warfarin is the anticoagulant the patient was taking before presentation for stroke prophylaxis in atrial fibrillation.
+    entity{tuple_delimiter}left-sided weakness{tuple_delimiter}Sign_symptom{tuple_delimiter}left-sided weakness is a transient focal neurological deficit described at presentation.
+    entity{tuple_delimiter}facial droop{tuple_delimiter}Sign_symptom{tuple_delimiter}facial droop is a transient focal neurological deficit described at presentation.
+    entity{tuple_delimiter}MRI of the brain{tuple_delimiter}Diagnostic_procedure{tuple_delimiter}MRI of the brain is the imaging study performed to evaluate for acute cerebral ischemic injury.
+    entity{tuple_delimiter}acute infarct{tuple_delimiter}Clinical_event{tuple_delimiter}acute infarct is the ischemic brain injury that was specifically not seen on MRI in this case.
+    entity{tuple_delimiter}transient ischemic attack{tuple_delimiter}Disease_disorder{tuple_delimiter}transient ischemic attack is the diagnosis supported by transient focal deficits without acute infarct on MRI.
+    entity{tuple_delimiter}INR{tuple_delimiter}Lab_test{tuple_delimiter}INR is the coagulation monitoring test used to assess warfarin effect.
+    entity{tuple_delimiter}1.2{tuple_delimiter}Lab_value{tuple_delimiter}1.2 is the INR value on admission and indicates subtherapeutic anticoagulation in the documented context.
+    entity{tuple_delimiter}subtherapeutic{tuple_delimiter}Clinical_event{tuple_delimiter}subtherapeutic describes the inadequate degree of anticoagulation documented for atrial fibrillation in this case.
+    entity{tuple_delimiter}apixaban{tuple_delimiter}Medication{tuple_delimiter}apixaban is the medication recommended as an alternative anticoagulant for better stroke prophylaxis.
+    relation{tuple_delimiter}atrial fibrillation{tuple_delimiter}transient ischemic attack{tuple_delimiter}risk_factor_for{tuple_delimiter}atrial fibrillation is the clinically relevant embolic risk factor linked to transient ischemic attack in this case.
+    relation{tuple_delimiter}transient ischemic attack{tuple_delimiter}left-sided weakness{tuple_delimiter}characterized_by{tuple_delimiter}left-sided weakness is one of the transient focal deficits characterizing the transient ischemic attack.
+    relation{tuple_delimiter}transient ischemic attack{tuple_delimiter}facial droop{tuple_delimiter}characterized_by{tuple_delimiter}facial droop is one of the transient focal deficits characterizing the transient ischemic attack.
+    relation{tuple_delimiter}MRI of the brain{tuple_delimiter}acute infarct{tuple_delimiter}identified_by{tuple_delimiter}MRI of the brain was the diagnostic procedure used to evaluate for acute infarct and did not show it in this case.
+    relation{tuple_delimiter}1.2{tuple_delimiter}subtherapeutic{tuple_delimiter}indicates{tuple_delimiter}the INR value of 1.2 indicates subtherapeutic anticoagulation in the documented clinical context.
+    relation{tuple_delimiter}warfarin{tuple_delimiter}atrial fibrillation{tuple_delimiter}treats{tuple_delimiter}warfarin was being used for stroke prophylaxis in atrial fibrillation before the event.
+    relation{tuple_delimiter}apixaban{tuple_delimiter}atrial fibrillation{tuple_delimiter}treats{tuple_delimiter}apixaban was recommended to improve stroke prophylaxis for atrial fibrillation.
+    relation{tuple_delimiter}subtherapeutic{tuple_delimiter}warfarin{tuple_delimiter}characterized_by{tuple_delimiter}the documented anticoagulation status indicates that warfarin effect was subtherapeutic at presentation.
     {completion_delimiter}
+
 entity_extraction_json_examples:
   - |
     {
       "entities": [
         {
-          "name": "<entity_name>",
-          "type": "<entity_type>",
-          "description": "<entity_description>"
+          "name": "community-acquired pneumonia",
+          "type": "Disease_disorder",
+          "description": "community-acquired pneumonia is the primary diagnosis, supported by fever, productive cough, pleuritic chest pain, and right lower lobe consolidation."
         },
         {
-          "name": "<related_entity_name>",
-          "type": "<related_entity_type>",
-          "description": "<related_entity_description>"
+          "name": "Streptococcus pneumoniae",
+          "type": "Pathogen",
+          "description": "Streptococcus pneumoniae is the causative pathogen confirmed by blood culture in this case."
+        },
+        {
+          "name": "productive cough with rusty sputum",
+          "type": "Sign_symptom",
+          "description": "productive cough with rusty sputum is a clinically important presenting respiratory symptom in this case."
+        },
+        {
+          "name": "Chest X-ray",
+          "type": "Diagnostic_procedure",
+          "description": "Chest X-ray is the imaging study used to evaluate the lungs in this case."
+        },
+        {
+          "name": "right lower lobe consolidation",
+          "type": "Lab_value",
+          "description": "right lower lobe consolidation is the imaging finding that supports a focal bacterial pneumonia process."
+        },
+        {
+          "name": "amoxicillin-clavulanate",
+          "type": "Medication",
+          "description": "amoxicillin-clavulanate is the antibiotic started to treat the diagnosed infection."
         }
       ],
       "relationships": [
         {
-          "source": "<entity_name>",
-          "target": "<related_entity_name>",
-          "keywords": "<relationship_keywords>",
-          "description": "<relationship_description>"
+          "source": "Streptococcus pneumoniae",
+          "target": "community-acquired pneumonia",
+          "keywords": "causes",
+          "description": "Streptococcus pneumoniae is identified in the case as the pathogen causing the pneumonia."
+        },
+        {
+          "source": "community-acquired pneumonia",
+          "target": "productive cough with rusty sputum",
+          "keywords": "characterized_by",
+          "description": "productive cough with rusty sputum is a presenting respiratory manifestation of the pneumonia."
+        },
+        {
+          "source": "Chest X-ray",
+          "target": "right lower lobe consolidation",
+          "keywords": "identified_by",
+          "description": "Chest X-ray is the diagnostic procedure that identified right lower lobe consolidation."
+        },
+        {
+          "source": "right lower lobe consolidation",
+          "target": "community-acquired pneumonia",
+          "keywords": "indicates",
+          "description": "right lower lobe consolidation is the imaging finding that supports the diagnosis of community-acquired pneumonia."
+        },
+        {
+          "source": "amoxicillin-clavulanate",
+          "target": "community-acquired pneumonia",
+          "keywords": "treats",
+          "description": "amoxicillin-clavulanate was started as treatment for the pneumonia."
         }
       ]
     }

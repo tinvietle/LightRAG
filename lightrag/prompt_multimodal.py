@@ -90,12 +90,13 @@ MULTIMODAL_PROMPTS[
 ================ INSTRUCTIONS ================
 
 1. CONTENT RECOGNITION
-   Examine the image carefully and identify:
+   Examine the image carefully and identify only what is visibly supported:
    - The primary subject(s), scene, or composition.
    - Salient visual elements (objects, people, text overlays, diagrams, charts, screenshots, etc.).
    - Spatial layout when meaningful (e.g. left/right, foreground/background, panels of a figure).
    - Any visible text — quote it verbatim when short; summarize when long.
    - Color, style, or visual cues only when they materially aid interpretation.
+   - Do not guess hidden intent, diagnosis, severity, pathophysiology, or any other unsupported clinical meaning.
 
 2. USE OF ADDITIONAL CONTEXT
    The Additional Context section provides surrounding information that may help disambiguate the image's role in its source document:
@@ -105,10 +106,10 @@ MULTIMODAL_PROMPTS[
    - Trailing Text : text appearing immediately AFTER the image ("n/a" = none)
 
    Rules:
-   - Use context to disambiguate abbreviations, units, named entities, and the image's purpose.
+   - Use context only to disambiguate abbreviations, units, named entities, and the image's likely role in the source document.
    - The IMAGE ITSELF takes priority when it conflicts with context — describe what is visible.
    - Only mention a relationship between the image and Leading/Trailing Text if it is clearly supported. If uncertain, omit it.
-   - Captions, footnotes, leading text and trailing text must NOT be used to invent visual content not present in the image.
+   - Captions, footnotes, leading text and trailing text must NOT be used to invent visual content, clinical findings, or diagnostic conclusions not visibly present in the image.
 
 3. NAMING (`name`)
    - Produce a concise, distinctive name (3–8 words, snake_case preferred).
@@ -123,12 +124,13 @@ MULTIMODAL_PROMPTS[
 
 5. DESCRIPTION (`description`, ≤ 500 words, natural prose — not bullets)
    Cover the following where applicable:
-   - What the image depicts overall and what question/claim it visually supports.
+   - What the image depicts overall.
    - The primary subject(s), their attributes, and any meaningful relationships between them.
    - Quantitative findings if the image is a chart/diagram (cite specific values when visible).
    - Visible text content that carries meaning (labels, annotations, axis titles).
    - Use specific proper nouns rather than pronouns whenever possible.
-   - If the image clearly supports the surrounding context(leading or trailing text), briefly note that relationship at the end. Otherwise omit.
+   - If the image clearly supports the surrounding context (leading or trailing text), briefly note that relationship at the end. Otherwise omit.
+   - Keep the description factual. Remove unsupported claims rather than speculating.
 
 6. OUTPUT RULES
    - Return ONE valid JSON object only.

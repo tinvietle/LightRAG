@@ -54,6 +54,14 @@ inputs/
 output/
 rag_storage/
 data/
+data_old/
+sft_prompt/fold1/
+reasoning_answer/
+reasoning_answer_rag/
+smol_json/
+txt_non_elapsed/
+txt_plain/
+ner_model/
 
 # User cumstomized prompt directory
 prompts/entity_type/

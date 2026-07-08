@@ -907,6 +907,124 @@ printf 'QUERY_LLM_MODEL=%s\\n' "${{ENV_VALUES[QUERY_LLM_MODEL]}}\"
     assert values["QUERY_LLM_MODEL"] == "custom-query-model"
 
 
+def test_collect_vlm_config_defaults_to_base_model_when_enabled() -> None:
+    """Enabling VLM should reuse compatible base-provider defaults when unset."""
+    output = run_bash(f"""
+set -euo pipefail
+source "{REPO_ROOT}/scripts/setup/setup.sh"
+reset_state
+
+ENV_VALUES[LLM_BINDING]="openai"
+ENV_VALUES[LLM_MODEL]="gpt-5-mini"
+ENV_VALUES[LLM_BINDING_HOST]="https://api.openai.com/v1"
+ENV_VALUES[LLM_BINDING_API_KEY]="base-openai-key"
+
+prompt_choice() {{ printf '%s' "$2"; }}
+confirm_default_no() {{ return 0; }}
+prompt_with_default() {{
+  case "$1" in
+    "VLM model") printf '%s' "$2" ;;
+    *) printf '%s' "$2" ;;
+  esac
+}}
+prompt_secret_until_valid_with_default() {{ printf '%s' "$2"; }}
+
+collect_vlm_config
+
+printf 'VLM_PROCESS_ENABLE=%s\\n' "${{ENV_VALUES[VLM_PROCESS_ENABLE]}}"
+printf 'VLM_LLM_BINDING=%s\\n' "${{ENV_VALUES[VLM_LLM_BINDING]}}"
+printf 'VLM_LLM_MODEL=%s\\n' "${{ENV_VALUES[VLM_LLM_MODEL]}}"
+printf 'VLM_LLM_BINDING_HOST=%s\\n' "${{ENV_VALUES[VLM_LLM_BINDING_HOST]}}"
+printf 'VLM_LLM_BINDING_API_KEY=%s\\n' "${{ENV_VALUES[VLM_LLM_BINDING_API_KEY]}}"
+""")
+    values = parse_lines(output)
+    assert values["VLM_PROCESS_ENABLE"] == "true"
+    assert values["VLM_LLM_MODEL"] == "gpt-5-mini"
+    assert values["VLM_LLM_BINDING"] == "openai"
+    assert values["VLM_LLM_BINDING_HOST"] == "https://api.openai.com/v1"
+    assert values["VLM_LLM_BINDING_API_KEY"] == "base-openai-key"
+
+
+def test_collect_vlm_config_disabling_preserves_existing_model() -> None:
+    """Disabling VLM should turn off processing without erasing saved overrides."""
+    output = run_bash(f"""
+set -euo pipefail
+source "{REPO_ROOT}/scripts/setup/setup.sh"
+reset_state
+
+ENV_VALUES[VLM_PROCESS_ENABLE]="true"
+ENV_VALUES[VLM_LLM_BINDING]="gemini"
+ENV_VALUES[VLM_LLM_MODEL]="gpt-4.1-mini"
+ENV_VALUES[VLM_LLM_BINDING_HOST]="https://generativelanguage.googleapis.com"
+ENV_VALUES[VLM_LLM_BINDING_API_KEY]="vlm-key"
+
+confirm_default_yes() {{ return 1; }}
+
+collect_vlm_config
+
+printf 'VLM_PROCESS_ENABLE=%s\\n' "${{ENV_VALUES[VLM_PROCESS_ENABLE]}}"
+printf 'VLM_LLM_BINDING=%s\\n' "${{ENV_VALUES[VLM_LLM_BINDING]}}"
+printf 'VLM_LLM_MODEL=%s\\n' "${{ENV_VALUES[VLM_LLM_MODEL]}}"
+printf 'VLM_LLM_BINDING_HOST=%s\\n' "${{ENV_VALUES[VLM_LLM_BINDING_HOST]}}"
+printf 'VLM_LLM_BINDING_API_KEY=%s\\n' "${{ENV_VALUES[VLM_LLM_BINDING_API_KEY]}}"
+""")
+    values = parse_lines(output)
+    assert values["VLM_PROCESS_ENABLE"] == "false"
+    assert values["VLM_LLM_BINDING"] == "gemini"
+    assert values["VLM_LLM_MODEL"] == "gpt-4.1-mini"
+    assert values["VLM_LLM_BINDING_HOST"] == "https://generativelanguage.googleapis.com"
+    assert values["VLM_LLM_BINDING_API_KEY"] == "vlm-key"
+
+
+def test_collect_vlm_config_can_override_provider_host_and_api_key() -> None:
+    """Enabling VLM should collect explicit provider, host, and API key overrides."""
+    output = run_bash(f"""
+set -euo pipefail
+source "{REPO_ROOT}/scripts/setup/setup.sh"
+reset_state
+
+ENV_VALUES[LLM_BINDING]="openai"
+ENV_VALUES[LLM_MODEL]="gpt-5-mini"
+ENV_VALUES[LLM_BINDING_HOST]="https://api.openai.com/v1"
+ENV_VALUES[LLM_BINDING_API_KEY]="base-openai-key"
+
+prompt_choice() {{
+  case "$1" in
+    "VLM provider") printf 'gemini' ;;
+    *) printf '%s' "$2" ;;
+  esac
+}}
+confirm_default_no() {{ return 0; }}
+prompt_with_default() {{
+  case "$1" in
+    "VLM model") printf 'gemini-2.5-flash' ;;
+    "VLM Gemini endpoint") printf 'https://generativelanguage.googleapis.com' ;;
+    *) printf '%s' "$2" ;;
+  esac
+}}
+prompt_secret_until_valid_with_default() {{
+  case "$1" in
+    "VLM Gemini API key: ") printf 'gemini-vlm-key' ;;
+    *) printf '%s' "$2" ;;
+  esac
+}}
+
+collect_vlm_config
+
+printf 'VLM_PROCESS_ENABLE=%s\\n' "${{ENV_VALUES[VLM_PROCESS_ENABLE]}}"
+printf 'VLM_LLM_BINDING=%s\\n' "${{ENV_VALUES[VLM_LLM_BINDING]}}"
+printf 'VLM_LLM_MODEL=%s\\n' "${{ENV_VALUES[VLM_LLM_MODEL]}}"
+printf 'VLM_LLM_BINDING_HOST=%s\\n' "${{ENV_VALUES[VLM_LLM_BINDING_HOST]}}"
+printf 'VLM_LLM_BINDING_API_KEY=%s\\n' "${{ENV_VALUES[VLM_LLM_BINDING_API_KEY]}}"
+""")
+    values = parse_lines(output)
+    assert values["VLM_PROCESS_ENABLE"] == "true"
+    assert values["VLM_LLM_BINDING"] == "gemini"
+    assert values["VLM_LLM_MODEL"] == "gemini-2.5-flash"
+    assert values["VLM_LLM_BINDING_HOST"] == "https://generativelanguage.googleapis.com"
+    assert values["VLM_LLM_BINDING_API_KEY"] == "gemini-vlm-key"
+
+
 def test_collect_rerank_config_preserves_api_key_when_disabled(tmp_path: Path) -> None:
     """Disabling reranking should preserve credentials so they survive re-enable."""
     write_text_lines(

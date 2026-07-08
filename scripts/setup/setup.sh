@@ -1848,6 +1848,28 @@ default_llm_model_for_binding() {
   esac
 }
 
+default_vlm_model_for_binding() {
+  local binding="$1"
+
+  case "$binding" in
+    openai|azure_openai)
+      printf 'gpt-5-mini'
+      ;;
+    ollama)
+      printf 'llava:latest'
+      ;;
+    gemini)
+      printf 'gemini-flash-latest'
+      ;;
+    bedrock)
+      printf 'anthropic.claude-3-5-sonnet-20241022-v2:0'
+      ;;
+    *)
+      printf 'gpt-5-mini'
+      ;;
+  esac
+}
+
 default_embedding_model_for_binding() {
   local binding="$1"
 
@@ -1958,6 +1980,113 @@ collect_llm_config() {
   query_model="$(prompt_with_default "Query LLM model" "$query_default")"
   ENV_VALUES["KEYWORD_LLM_MODEL"]="$keyword_model"
   ENV_VALUES["QUERY_LLM_MODEL"]="$query_model"
+}
+
+collect_vlm_config() {
+  local options=("openai" "azure_openai" "ollama" "gemini" "bedrock")
+  local vlm_enabled_default="no"
+  local explicit_vlm_binding="${ENV_VALUES[VLM_LLM_BINDING]:-}"
+  local base_binding="${ENV_VALUES[LLM_BINDING]:-openai}"
+  local current_binding="${explicit_vlm_binding:-$base_binding}"
+  local binding=""
+  local vlm_model_default=""
+  local vlm_model=""
+  local base_llm_model="${ENV_VALUES[LLM_MODEL]:-$(default_llm_model_for_binding "$base_binding")}"
+  local current_vlm_model=""
+  local host=""
+  local host_default=""
+  local api_key=""
+  local base_host_fallback=""
+  local base_api_key_fallback=""
+
+  case "${ENV_VALUES[VLM_PROCESS_ENABLE]:-}" in
+    true|TRUE|True|1|yes|YES|Yes|y|Y|on|ON|On|t|T)
+      vlm_enabled_default="yes"
+      ;;
+  esac
+
+  if [[ "$vlm_enabled_default" == "yes" ]]; then
+    if ! confirm_default_yes "Enable VLM image description for multimodal analysis?"; then
+      ENV_VALUES["VLM_PROCESS_ENABLE"]="false"
+      return
+    fi
+  else
+    if ! confirm_default_no "Enable VLM image description for multimodal analysis?"; then
+      ENV_VALUES["VLM_PROCESS_ENABLE"]="false"
+      return
+    fi
+  fi
+
+  binding="$(prompt_choice "VLM provider" "$current_binding" "${options[@]}")"
+  current_vlm_model="${ENV_VALUES[VLM_LLM_MODEL]:-}"
+  if [[ -n "$explicit_vlm_binding" && "$binding" == "$explicit_vlm_binding" && -n "$current_vlm_model" ]]; then
+    vlm_model_default="$current_vlm_model"
+  elif [[ "$binding" == "$base_binding" ]]; then
+    vlm_model_default="$base_llm_model"
+  else
+    vlm_model_default="$(default_vlm_model_for_binding "$binding")"
+  fi
+
+  vlm_model="$(prompt_with_default "VLM model" "$vlm_model_default")"
+
+  if [[ "$binding" == "$base_binding" ]]; then
+    base_host_fallback="${ENV_VALUES[LLM_BINDING_HOST]:-}"
+    base_api_key_fallback="${ENV_VALUES[LLM_BINDING_API_KEY]:-}"
+  fi
+
+  case "$binding" in
+    ollama)
+      if [[ -n "$explicit_vlm_binding" && "$binding" == "$explicit_vlm_binding" ]]; then
+        host_default="$(provider_default_or_existing "$binding" "$explicit_vlm_binding" "${ENV_VALUES[VLM_LLM_BINDING_HOST]:-}" "$(default_loopback_url 11434)")"
+      else
+        host_default="${base_host_fallback:-$(default_loopback_url 11434)}"
+      fi
+      host="$(prompt_with_default "VLM Ollama host" "$host_default")"
+      api_key=""
+      ;;
+    azure_openai)
+      if [[ -n "$explicit_vlm_binding" && "$binding" == "$explicit_vlm_binding" ]]; then
+        host_default="$(provider_default_or_existing "$binding" "$explicit_vlm_binding" "${ENV_VALUES[VLM_LLM_BINDING_HOST]:-}" "https://example.openai.azure.com/")"
+      else
+        host_default="${base_host_fallback:-https://example.openai.azure.com/}"
+      fi
+      host="$(prompt_with_default "VLM Azure OpenAI endpoint" "$host_default")"
+      api_key="$(prompt_secret_until_valid_with_default "VLM Azure OpenAI API key: " "${ENV_VALUES[VLM_LLM_BINDING_API_KEY]:-$base_api_key_fallback}" validate_api_key azure_openai)"
+      ;;
+    gemini)
+      if [[ -n "$explicit_vlm_binding" && "$binding" == "$explicit_vlm_binding" ]]; then
+        host_default="$(provider_default_or_existing "$binding" "$explicit_vlm_binding" "${ENV_VALUES[VLM_LLM_BINDING_HOST]:-}" "DEFAULT_GEMINI_ENDPOINT")"
+      else
+        host_default="${base_host_fallback:-DEFAULT_GEMINI_ENDPOINT}"
+      fi
+      host="$(prompt_with_default "VLM Gemini endpoint" "$host_default")"
+      api_key="$(prompt_secret_until_valid_with_default "VLM Gemini API key: " "${ENV_VALUES[VLM_LLM_BINDING_API_KEY]:-$base_api_key_fallback}" validate_api_key gemini)"
+      ;;
+    bedrock)
+      if [[ -n "$explicit_vlm_binding" && "$binding" == "$explicit_vlm_binding" ]]; then
+        host="$(provider_default_or_existing "$binding" "$explicit_vlm_binding" "${ENV_VALUES[VLM_LLM_BINDING_HOST]:-}" "DEFAULT_BEDROCK_ENDPOINT")"
+      else
+        host="${base_host_fallback:-DEFAULT_BEDROCK_ENDPOINT}"
+      fi
+      api_key=""
+      collect_bedrock_credentials
+      ;;
+    *)
+      if [[ -n "$explicit_vlm_binding" && "$binding" == "$explicit_vlm_binding" ]]; then
+        host_default="$(provider_default_or_existing "$binding" "$explicit_vlm_binding" "${ENV_VALUES[VLM_LLM_BINDING_HOST]:-}" "https://api.openai.com/v1")"
+      else
+        host_default="${base_host_fallback:-https://api.openai.com/v1}"
+      fi
+      host="$(prompt_with_default "VLM endpoint" "$host_default")"
+      api_key="$(prompt_secret_until_valid_with_default "VLM API key: " "${ENV_VALUES[VLM_LLM_BINDING_API_KEY]:-$base_api_key_fallback}" validate_api_key "$binding")"
+      ;;
+  esac
+
+  ENV_VALUES["VLM_PROCESS_ENABLE"]="true"
+  ENV_VALUES["VLM_LLM_BINDING"]="$binding"
+  ENV_VALUES["VLM_LLM_MODEL"]="$vlm_model"
+  ENV_VALUES["VLM_LLM_BINDING_HOST"]="$host"
+  store_optional_env_value "VLM_LLM_BINDING_API_KEY" "$api_key"
 }
 
 collect_embedding_config() {
@@ -2390,13 +2519,17 @@ env_base_flow() {
   load_existing_env_if_present
   initialize_default_storage_backends
 
-  log_info "Base configuration wizard (LLM / Embedding / Reranker)"
-  echo "This wizard only modifies LLM, embedding, and reranker settings."
+  log_info "Base configuration wizard (LLM / VLM / Embedding / Reranker)"
+  echo "This wizard only modifies LLM, VLM, embedding, and reranker settings."
   echo "Storage, server, and security settings are preserved."
   echo ""
 
   log_step "LLM configuration"
   collect_llm_config
+  echo ""
+
+  log_step "VLM configuration"
+  collect_vlm_config
   echo ""
 
   # ── Embedding ────────────────────────────────────────────────────────────────

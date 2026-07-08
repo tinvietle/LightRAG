@@ -363,6 +363,11 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
     )
     """Per-response cap on entity rows/objects."""
 
+    enable_gliner_ner: bool = field(
+        default_factory=lambda: get_env_value("ENABLE_GLINER_NER", True, bool)
+    )
+    """Run optional GLiNER pre-recognition before LLM entity extraction."""
+
     force_llm_summary_on_merge: int = field(
         default=get_env_value(
             "FORCE_LLM_SUMMARY_ON_MERGE", DEFAULT_FORCE_LLM_SUMMARY_ON_MERGE, int

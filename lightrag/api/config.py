@@ -550,6 +550,7 @@ def parse_args() -> argparse.Namespace:
         "ENABLE_LLM_CACHE_FOR_EXTRACT", True, bool
     )
     args.enable_llm_cache = get_env_value("ENABLE_LLM_CACHE", True, bool)
+    args.enable_gliner_ner = get_env_value("ENABLE_GLINER_NER", True, bool)
 
     # --- Per-role LLM configuration (driven by lightrag.ROLES registry) ---
     for spec in ROLES:
@@ -712,6 +713,9 @@ def parse_args() -> argparse.Namespace:
     # Default: 100MB (104857600 bytes)
     args.max_upload_size = get_env_value(
         "MAX_UPLOAD_SIZE", 104857600, int, special_none=True
+    )
+    args.max_multimodal_case_images = get_env_value(
+        "MAX_MULTIMODAL_CASE_IMAGES", 10, int
     )
 
     # Embedding prefix configuration for context-aware embeddings. Empty prefixes

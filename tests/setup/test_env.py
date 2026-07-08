@@ -975,6 +975,66 @@ env_base_flow
         assert "env_file:" not in generated_compose
 
 
+def test_env_base_flow_can_enable_vlm_model_for_multimodal_analysis(
+    tmp_path: Path,
+) -> None:
+    """env-base should expose VLM provider settings and persist them."""
+    write_text_lines(
+        tmp_path / "env.example",
+        (REPO_ROOT / "env.example").read_text(encoding="utf-8").splitlines(),
+    )
+    write_text_lines(
+        tmp_path / "docker-compose.yml",
+        (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8").splitlines(),
+    )
+
+    run_bash(f"""
+set -euo pipefail
+source "{REPO_ROOT}/scripts/setup/setup.sh"
+REPO_ROOT="{tmp_path}"
+
+prompt_choice() {{ printf '%s' "$2"; }}
+prompt_with_default() {{
+  case "$1" in
+    "VLM model") printf 'gpt-4.1-mini' ;;
+    "VLM endpoint") printf 'https://api.openai.com/v1' ;;
+    *) printf '%s' "$2" ;;
+  esac
+}}
+prompt_until_valid() {{ printf '%s' "$2"; }}
+prompt_secret_with_default() {{ printf '%s' "$2"; }}
+prompt_secret_until_valid_with_default() {{
+  case "$1" in
+    "LLM API key: "|"Embedding API key: "|"VLM API key: ") printf 'sk-test-key' ;;
+    *) printf '%s' "$2" ;;
+  esac
+}}
+confirm_default_no() {{
+  case "$1" in
+    "Enable VLM image description for multimodal analysis?") return 0 ;;
+    "Run embedding model locally via Docker (vLLM)?") return 1 ;;
+    "Enable reranking?") return 1 ;;
+    "Run LightRAG Server via Docker?") return 0 ;;
+    *) return 1 ;;
+  esac
+}}
+confirm_default_yes() {{
+  case "$1" in
+    *) return 1 ;;
+  esac
+}}
+confirm_required_yes_no() {{ return 0; }}
+
+env_base_flow
+""")
+    generated_env = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "VLM_PROCESS_ENABLE=true" in generated_env
+    assert "VLM_LLM_BINDING=openai" in generated_env
+    assert "VLM_LLM_MODEL=gpt-4.1-mini" in generated_env
+    assert "VLM_LLM_BINDING_HOST=https://api.openai.com/v1" in generated_env
+    assert "VLM_LLM_BINDING_API_KEY=sk-test-key" in generated_env
+
+
 def test_env_base_flow_generates_validatable_env_on_clean_checkout(
     tmp_path: Path,
 ) -> None:

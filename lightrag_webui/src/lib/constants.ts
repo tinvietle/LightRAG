@@ -88,6 +88,54 @@ export const supportedFileTypes = {
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx']
 }
 
+export const multimodalTextCaseFileTypes = {
+  'text/plain': [
+    '.txt',
+    '.md',
+    '.textpack',
+    '.mdx',
+    '.html',
+    '.htm',
+    '.csv',
+    '.json',
+    '.xml',
+    '.yaml',
+    '.yml',
+    '.log',
+    '.conf',
+    '.ini',
+    '.properties',
+    '.sql',
+    '.bat',
+    '.sh',
+    '.c',
+    '.h',
+    '.cpp',
+    '.hpp',
+    '.py',
+    '.java',
+    '.js',
+    '.ts',
+    '.swift',
+    '.go',
+    '.rb',
+    '.php',
+    '.css',
+    '.scss',
+    '.less',
+    '.tex',
+    '.rtf'
+  ]
+}
+
+export const multimodalImageFileTypes = {
+  'image/png': ['.png'],
+  'image/jpeg': ['.jpg', '.jpeg'],
+  'image/webp': ['.webp'],
+  'image/gif': ['.gif'],
+  'image/bmp': ['.bmp']
+}
+
 export const SiteInfo = {
   name: 'LightRAG',
   home: '/',

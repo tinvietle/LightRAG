@@ -34,6 +34,7 @@ def _make_global_config(
     use_json: bool = False,
     max_gleaning: int = 0,
     prompt_profile: dict | None = None,
+    enable_gliner_ner: bool = True,
 ) -> dict:
     tokenizer = Tokenizer("dummy", DummyTokenizer())
     extract_func = AsyncMock(return_value="")
@@ -53,6 +54,7 @@ def _make_global_config(
         "max_extract_input_tokens": 20480,
         "llm_model_max_async": 1,
         "entity_extraction_use_json": use_json,
+        "enable_gliner_ner": enable_gliner_ner,
         "_entity_extraction_prompt_profile": prompt_profile,
     }
 
@@ -221,27 +223,39 @@ def test_default_entity_types_guidance_exists():
 
 @pytest.mark.offline
 def test_default_entity_types_guidance_covers_all_types():
-    """Default guidance must mention all 11 canonical entity types."""
+    """Default guidance must mention all biomedical entity types."""
     from lightrag.prompt import PROMPTS
 
     guidance = PROMPTS["default_entity_types_guidance"]
     expected_types = [
-        "Person",
-        "Creature",
-        "Organization",
-        "Location",
-        "Event",
-        "Concept",
-        "Method",
-        "Content",
-        "Data",
-        "Artifact",
-        "NaturalObject",
+        "Disease_disorder",
+        "Pathogen",
+        "Medication",
+        "Anatomical_location",
+        "Diagnostic_procedure",
+        "Therapeutic_procedure",
+        "Biological_structure",
+        "Clinical_event",
+        "Organism",
+        "Sign_symptom",
+        "Date",
+        "Lab_test",
+        "Lab_value",
+        "Transmission_vector",
     ]
     for t in expected_types:
         assert t in guidance, (
             f"Expected entity type '{t}' missing from default_entity_types_guidance"
         )
+
+
+@pytest.mark.offline
+def test_default_entity_types_guidance_mentions_gliner_usage():
+    from lightrag.prompt import PROMPTS
+
+    guidance = PROMPTS["default_entity_types_guidance"]
+    assert "GLiNER" in guidance
+    assert "pre-recognition" in guidance
 
 
 @pytest.mark.offline
@@ -466,6 +480,8 @@ def test_text_continue_prompt_requires_relation_prefix_for_corrections():
         "whose source and target entities are both included in this response"
         not in prompt
     )
+    assert "{recognized_entities_section}" in prompt
+    assert "---Input Text---" in prompt
 
 
 @pytest.mark.offline
@@ -481,6 +497,7 @@ def test_text_user_prompt_includes_quantity_limits():
         "If the row limit is reached, output `{completion_delimiter}` immediately"
         in prompt
     )
+    assert "{recognized_entities_section}" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +629,101 @@ def test_json_continue_prompt_includes_quantity_limits():
         "may reference entities already extracted correctly in the previous response"
         in prompt
     )
+    assert "{recognized_entities_section}" in prompt
+    assert "---Input Text---" in prompt
+
+
+@pytest.mark.offline
+@pytest.mark.asyncio
+async def test_text_mode_gliner_block_injected_into_initial_and_continue_prompts():
+    from lightrag.operate import extract_entities
+
+    global_config = _make_global_config(use_json=False, max_gleaning=1)
+    llm_func = global_config["llm_model_func"]
+    llm_func.return_value = _TEXT_MODE_RESPONSE
+
+    with (
+        patch("lightrag.operate.logger"),
+        patch(
+            "lightrag.operate.recognize_entities",
+            new=AsyncMock(return_value=("- Dengue fever\n- Thrombocytopenia", [])),
+        ) as recognize_mock,
+    ):
+        await extract_entities(
+            chunks=_make_chunks("Dengue fever caused thrombocytopenia."),
+            global_config=global_config,
+        )
+
+    assert recognize_mock.await_count == 1
+    initial_prompt = llm_func.call_args_list[0][0][0]
+    continue_prompt = llm_func.call_args_list[1][0][0]
+    expected_block = (
+        "<Recognized_Entities_from_NER>\n"
+        "- Dengue fever\n"
+        "- Thrombocytopenia\n"
+        "</Recognized_Entities_from_NER>\n"
+    )
+    assert expected_block in initial_prompt
+    assert expected_block in continue_prompt
+    assert "Dengue fever caused thrombocytopenia." in continue_prompt
+
+
+@pytest.mark.offline
+@pytest.mark.asyncio
+async def test_json_mode_gliner_block_injected_into_initial_and_continue_prompts():
+    from lightrag.operate import extract_entities
+
+    global_config = _make_global_config(use_json=True, max_gleaning=1)
+    llm_func = global_config["llm_model_func"]
+    llm_func.return_value = _JSON_MODE_RESPONSE
+
+    with (
+        patch("lightrag.operate.logger"),
+        patch(
+            "lightrag.operate.recognize_entities",
+            new=AsyncMock(return_value=("- Malaria\n- Anopheles", [])),
+        ) as recognize_mock,
+    ):
+        await extract_entities(
+            chunks=_make_chunks("Malaria is transmitted by Anopheles mosquitoes."),
+            global_config=global_config,
+        )
+
+    assert recognize_mock.await_count == 1
+    initial_prompt = llm_func.call_args_list[0][0][0]
+    continue_prompt = llm_func.call_args_list[1][0][0]
+    expected_block = (
+        "<Recognized_Entities_from_NER>\n"
+        "- Malaria\n"
+        "- Anopheles\n"
+        "</Recognized_Entities_from_NER>\n"
+    )
+    assert expected_block in initial_prompt
+    assert expected_block in continue_prompt
+    assert "Malaria is transmitted by Anopheles mosquitoes." in continue_prompt
+
+
+@pytest.mark.offline
+@pytest.mark.asyncio
+async def test_gliner_can_be_disabled_without_affecting_prompts():
+    from lightrag.operate import extract_entities
+
+    global_config = _make_global_config(use_json=False, enable_gliner_ner=False)
+    llm_func = global_config["llm_model_func"]
+    llm_func.return_value = _TEXT_MODE_RESPONSE
+
+    with (
+        patch("lightrag.operate.logger"),
+        patch("lightrag.operate.recognize_entities", new=AsyncMock()) as recognize_mock,
+    ):
+        await extract_entities(
+            chunks=_make_chunks(),
+            global_config=global_config,
+        )
+
+    recognize_mock.assert_not_awaited()
+    initial_prompt = llm_func.call_args_list[0][0][0]
+    assert "<Recognized_Entities_from_NER>" not in initial_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -1023,10 +1135,7 @@ async def test_extract_entities_uses_cached_prompt_profile_without_reloading():
 def test_sample_prompt_file_matches_builtin_prompt_data():
     _require_yaml()
 
-    from lightrag.prompt import (
-        get_default_entity_extraction_prompt_profile,
-        load_entity_extraction_prompt_profile,
-    )
+    from lightrag.prompt import load_entity_extraction_prompt_profile
 
     sample_file = (
         Path(__file__).resolve().parents[2]
@@ -1036,7 +1145,25 @@ def test_sample_prompt_file_matches_builtin_prompt_data():
     )
 
     loaded_profile = load_entity_extraction_prompt_profile(sample_file)
-    assert loaded_profile == get_default_entity_extraction_prompt_profile()
+    assert "entity_types_guidance" in loaded_profile
+    assert "community-acquired pneumonia" in loaded_profile["entity_extraction_json_examples"][0]
+    assert "transient ischemic attack" in loaded_profile["entity_extraction_examples"][0]
+
+
+@pytest.mark.offline
+def test_medical_prompt_rules_present_in_text_and_json_system_prompts():
+    from lightrag.prompt import PROMPTS
+
+    for prompt_key in (
+        "entity_extraction_system_prompt",
+        "entity_extraction_json_system_prompt",
+    ):
+        prompt = PROMPTS[prompt_key]
+        assert "Copy the exact text span from the input text" in prompt
+        assert "Do not normalize, rephrase, expand abbreviations" in prompt
+        assert "Do not merge clinically meaningful modifiers" in prompt
+        assert "clinical causal or logical direction" in prompt
+        assert "risk_factor_for" in prompt
 
 
 @pytest.mark.offline
@@ -1275,7 +1402,9 @@ def _render_text_user_prompt(heading_context_block: str) -> str:
         max_entity_records=40,
         completion_delimiter="<|COMPLETE|>",
         language="English",
+        entity_types_guidance="- Disease_disorder: diagnoses",
         input_text="Alice founded Acme Corp.",
+        recognized_entities_section="",
         heading_context_block=heading_context_block,
     )
 
@@ -1287,8 +1416,9 @@ def _render_json_user_prompt(heading_context_block: str) -> str:
         max_total_records=100,
         max_entity_records=40,
         language="English",
-        entity_types_guidance="- Person: humans",
+        entity_types_guidance="- Disease_disorder: diagnoses",
         input_text="Alice founded Acme Corp.",
+        recognized_entities_section="",
         heading_context_block=heading_context_block,
     )
 
@@ -1370,7 +1500,9 @@ def test_text_user_prompt_section_context_hidden_and_byte_identical_when_no_head
         max_entity_records=40,
         completion_delimiter="<|COMPLETE|>",
         language="English",
+        entity_types_guidance="- Disease_disorder: diagnoses",
         input_text="Alice founded Acme Corp.",
+        recognized_entities_section="",
     )
     assert rendered == baseline
 
@@ -1389,8 +1521,9 @@ def test_json_user_prompt_section_context_hidden_and_byte_identical_when_no_head
         max_total_records=100,
         max_entity_records=40,
         language="English",
-        entity_types_guidance="- Person: humans",
+        entity_types_guidance="- Disease_disorder: diagnoses",
         input_text="Alice founded Acme Corp.",
+        recognized_entities_section="",
     )
     assert rendered == baseline
 

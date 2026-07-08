@@ -62,6 +62,7 @@ from lightrag.chunk_schema import (
     format_parent_headings,
     strip_internal_multimodal_markup_for_extraction,
 )
+from lightrag.kg.ner import extract_entity_labels_from_guidance, recognize_entities
 from lightrag.prompt import PROMPTS, resolve_entity_extraction_prompt_profile
 from lightrag.constants import (
     GRAPH_FIELD_SEP,
@@ -3374,6 +3375,8 @@ async def extract_entities(
             addon_params, use_json_extraction
         )
     entity_types_guidance = prompt_profile["entity_types_guidance"]
+    gliner_entity_labels = extract_entity_labels_from_guidance(entity_types_guidance)
+    gliner_enabled = global_config.get("enable_gliner_ner", True)
 
     max_total_records = global_config["entity_extract_max_records"]
     max_entity_records = global_config["entity_extract_max_entities"]
@@ -3454,6 +3457,19 @@ async def extract_entities(
 
         # Create cache keys collector for batch processing
         cache_keys_collector = []
+        recognized_entities_section = ""
+        if gliner_enabled:
+            recognized_entities_str, _ = await recognize_entities(
+                content,
+                gliner_entity_labels,
+                threshold=0.3,
+            )
+            if recognized_entities_str:
+                recognized_entities_section = (
+                    f"<Recognized_Entities_from_NER>\n"
+                    f"{recognized_entities_str}\n"
+                    f"</Recognized_Entities_from_NER>\n"
+                )
 
         if use_json_extraction:
             # JSON mode: use JSON prompts and pass entity_extraction flag to LLM provider
@@ -3467,11 +3483,19 @@ async def extract_entities(
                     **context_base,
                     "input_text": content,
                     "heading_context_block": heading_context_block,
+                    "recognized_entities_section": recognized_entities_section,
                 }
             )
             entity_continue_extraction_user_prompt = PROMPTS[
                 "entity_continue_extraction_json_user_prompt"
-            ].format(**context_base)
+            ].format(
+                **{
+                    **context_base,
+                    "input_text": content,
+                    "heading_context_block": heading_context_block,
+                    "recognized_entities_section": recognized_entities_section,
+                }
+            )
         else:
             # Text mode: use traditional delimiter-based prompts
             entity_extraction_system_prompt = PROMPTS[
@@ -3484,11 +3508,19 @@ async def extract_entities(
                     **context_base,
                     "input_text": content,
                     "heading_context_block": heading_context_block,
+                    "recognized_entities_section": recognized_entities_section,
                 }
             )
             entity_continue_extraction_user_prompt = PROMPTS[
                 "entity_continue_extraction_user_prompt"
-            ].format(**{**context_base, "input_text": content})
+            ].format(
+                **{
+                    **context_base,
+                    "input_text": content,
+                    "heading_context_block": heading_context_block,
+                    "recognized_entities_section": recognized_entities_section,
+                }
+            )
 
         final_result, timestamp = await use_llm_func_with_cache(
             entity_extraction_user_prompt,

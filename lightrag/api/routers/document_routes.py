@@ -3,6 +3,7 @@ This module contains all document-related routes for the LightRAG API.
 """
 
 import asyncio
+import mimetypes
 import re
 import shutil
 import time
@@ -13,7 +14,6 @@ from lightrag.utils import (
     performance_timing_log,
     validate_workspace,
 )
-import aiofiles
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,10 +51,16 @@ from lightrag.parser.routing import (
     resolve_parser_directives,
 )
 from lightrag.utils import (
+    compute_mdhash_id,
     generate_track_id,
     move_file_to_parsed_dir,
 )
 from lightrag.api.utils_api import get_combined_auth_dependency
+from lightrag.constants import DEFAULT_SUMMARY_LANGUAGE
+from lightrag.multimodal_case import (
+    augment_text_with_image_descriptions,
+    read_text_case_content,
+)
 from ..config import global_args
 
 
@@ -95,6 +101,47 @@ temp_prefix = "__tmp__"
 UNKNOWN_FILE_SOURCE = "unknown_source"
 LEGACY_EMPTY_FILE_PATH_SENTINELS = {"", "no-file-path"}
 ARCHIVED_FILE_SUFFIX_RE = re.compile(r"_(?:\d{3}|\d{10,})$")
+MULTIMODAL_CASE_IMAGES_DIRNAME = "images"
+DEFAULT_MULTIMODAL_CASE_IMAGE_LIMIT = 10
+MULTIMODAL_TEXT_CASE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".txt",
+        ".md",
+        ".textpack",
+        ".mdx",
+        ".html",
+        ".htm",
+        ".csv",
+        ".json",
+        ".xml",
+        ".yaml",
+        ".yml",
+        ".log",
+        ".conf",
+        ".ini",
+        ".properties",
+        ".sql",
+        ".bat",
+        ".sh",
+        ".c",
+        ".h",
+        ".cpp",
+        ".hpp",
+        ".py",
+        ".java",
+        ".js",
+        ".ts",
+        ".swift",
+        ".go",
+        ".rb",
+        ".php",
+        ".css",
+        ".scss",
+        ".less",
+        ".tex",
+        ".rtf",
+    }
+)
 
 
 def normalize_file_path(file_path: str | None) -> str:
@@ -158,6 +205,134 @@ def sanitize_filename(filename: str, input_dir: Path) -> str:
         raise HTTPException(status_code=400, detail="Invalid filename")
 
     return clean_name
+
+
+def _get_max_upload_size_bytes() -> int | None:
+    return getattr(global_args, "max_upload_size", None)
+
+
+def get_multimodal_case_image_limit() -> int:
+    raw_limit = getattr(
+        global_args,
+        "max_multimodal_case_images",
+        DEFAULT_MULTIMODAL_CASE_IMAGE_LIMIT,
+    )
+    try:
+        return max(0, int(raw_limit))
+    except (TypeError, ValueError):
+        return DEFAULT_MULTIMODAL_CASE_IMAGE_LIMIT
+
+
+def is_supported_multimodal_text_case(filename: str) -> bool:
+    return Path(filename).suffix.lower() in MULTIMODAL_TEXT_CASE_EXTENSIONS
+
+
+def get_case_images_root(input_dir: Path) -> Path:
+    return input_dir / MULTIMODAL_CASE_IMAGES_DIRNAME
+
+
+def get_case_image_dir(input_dir: Path, case_file_path: str) -> Path:
+    canonical_file_path = normalize_file_path(case_file_path)
+    case_key = compute_mdhash_id(canonical_file_path, prefix="case-")
+    image_dir = get_case_images_root(input_dir) / case_key
+    root_resolved = get_case_images_root(input_dir).resolve()
+    image_dir_resolved = image_dir.resolve()
+    if not image_dir_resolved.is_relative_to(root_resolved):
+        raise HTTPException(status_code=400, detail="Unsafe case image path detected")
+    return image_dir
+
+
+def _validate_image_upload(image: UploadFile) -> None:
+    content_type = (image.content_type or "").strip().lower()
+    if content_type.startswith("image/"):
+        return
+
+    mime_type, _ = mimetypes.guess_type(image.filename or "")
+    if mime_type and mime_type.startswith("image/"):
+        return
+
+    raise HTTPException(status_code=400, detail="Only image files are allowed.")
+
+
+async def _stream_upload_to_path(
+    upload_file: UploadFile,
+    target_path: Path,
+    *,
+    max_upload_size: int | None,
+) -> None:
+    bytes_written = 0
+    chunk_size = 1024 * 1024
+    needs_cleanup = False
+
+    with target_path.open("wb") as out_file:
+        while True:
+            chunk = upload_file.file.read(chunk_size)
+            if not chunk:
+                break
+
+            if max_upload_size is not None and max_upload_size > 0:
+                bytes_written += len(chunk)
+                if bytes_written > max_upload_size:
+                    needs_cleanup = True
+                    break
+
+            out_file.write(chunk)
+
+    if not needs_cleanup:
+        return
+
+    try:
+        target_path.unlink()
+    except Exception as cleanup_error:
+        logger.error(
+            "Error cleaning up oversized upload %s: %s",
+            target_path.name,
+            cleanup_error,
+        )
+
+    raise HTTPException(
+        status_code=413,
+        detail=(
+            "File too large. Maximum size: "
+            f"{max_upload_size / 1024 / 1024:.1f}MB, "
+            f"uploaded: {bytes_written / 1024 / 1024:.1f}MB"
+        ),
+    )
+
+
+async def save_case_images(
+    images: list[UploadFile] | None,
+    case_image_dir: Path,
+    *,
+    max_images: int,
+    max_upload_size: int | None,
+) -> list[Path]:
+    if not images:
+        return []
+
+    if len(images) > max_images:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many images uploaded. Maximum allowed: {max_images}.",
+        )
+
+    if case_image_dir.exists():
+        shutil.rmtree(case_image_dir, ignore_errors=True)
+    case_image_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_paths: list[Path] = []
+    for image in images:
+        _validate_image_upload(image)
+        safe_image_name = sanitize_filename(image.filename, case_image_dir)
+        image_path = case_image_dir / safe_image_name
+        await _stream_upload_to_path(
+            image,
+            image_path,
+            max_upload_size=max_upload_size,
+        )
+        saved_paths.append(image_path)
+
+    return saved_paths
 
 
 class ScanResponse(BaseModel):
@@ -1558,6 +1733,29 @@ def delete_file_variants_by_file_path(
     return deleted_files, errors
 
 
+def delete_case_images_by_file_path(
+    input_dir: Path,
+    file_path: str | None,
+) -> tuple[list[str], list[str]]:
+    if not file_path:
+        return [], []
+
+    canonical = normalize_file_path(file_path)
+    if canonical == UNKNOWN_FILE_SOURCE:
+        return [], []
+
+    case_image_dir = get_case_image_dir(input_dir, canonical)
+    if not case_image_dir.exists():
+        return [], []
+
+    try:
+        root_resolved = input_dir.resolve()
+        shutil.rmtree(case_image_dir)
+        return [str(case_image_dir.relative_to(root_resolved))], []
+    except Exception as error:
+        return [], [f"Failed to delete case image dir {case_image_dir.name}: {error}"]
+
+
 async def record_scan_warning(rag: LightRAG, message: str) -> None:
     logger.warning(message)
     try:
@@ -1980,6 +2178,83 @@ async def pipeline_index_texts(
     await rag.apipeline_process_enqueue_documents()
 
 
+async def pipeline_index_multimodal_case(
+    rag: LightRAG,
+    file_path: Path,
+    track_id: str | None = None,
+    image_paths: list[Path] | None = None,
+) -> tuple[bool, str]:
+    if track_id is None:
+        track_id = generate_track_id("upload_case")
+
+    normalized_file_source = normalize_file_path(file_path.name)
+
+    try:
+        file_size = 0
+        try:
+            stat = file_path.stat()
+            file_size = stat.st_size
+        except Exception:
+            file_size = 0
+
+        content = await read_text_case_content(file_path)
+        if not content.strip():
+            raise ValueError("Uploaded text case is empty.")
+
+        addon_params = getattr(rag, "addon_params", {}) or {}
+        language = addon_params.get("language", DEFAULT_SUMMARY_LANGUAGE)
+
+        if image_paths:
+            if getattr(rag, "vlm_process_enable", False):
+                use_vlm_func = (getattr(rag, "role_llm_funcs", {}) or {}).get("vlm")
+                if use_vlm_func is None:
+                    logger.warning(
+                        "[multimodal_case] VLM enabled but no VLM role is configured; "
+                        "ingesting original text without image descriptions for %s",
+                        file_path.name,
+                    )
+                else:
+                    content = await augment_text_with_image_descriptions(
+                        content,
+                        image_paths,
+                        use_vlm_func,
+                        language,
+                        max_images=get_multimodal_case_image_limit(),
+                    )
+            else:
+                logger.info(
+                    "[multimodal_case] VLM_PROCESS_ENABLE is false; "
+                    "ingesting original text without image descriptions for %s",
+                    file_path.name,
+                )
+
+        await pipeline_index_texts(
+            rag,
+            [content],
+            file_sources=[normalized_file_source],
+            track_id=track_id,
+        )
+        return True, track_id
+    except Exception as error:
+        error_files = [
+            {
+                "file_path": normalized_file_source,
+                "error_description": FILE_EXTRACTION_SUMMARY_PREFIX
+                + "Multimodal case ingestion error",
+                "original_error": str(error),
+                "file_size": file_size if "file_size" in locals() else 0,
+            }
+        ]
+        await rag.apipeline_enqueue_error_documents(error_files, track_id)
+        logger.error(
+            "[multimodal_case] Error indexing %s: %s",
+            file_path.name,
+            error,
+        )
+        logger.error(traceback.format_exc())
+        return False, track_id
+
+
 async def run_scanning_process(
     rag: LightRAG, doc_manager: DocumentManager, track_id: str = None
 ):
@@ -2326,6 +2601,14 @@ async def background_delete_documents(
                                     result.file_path,
                                 )
                             )
+                            deleted_image_dirs, image_delete_errors = (
+                                delete_case_images_by_file_path(
+                                    doc_manager.input_dir,
+                                    result.file_path,
+                                )
+                            )
+                            deleted_files.extend(deleted_image_dirs)
+                            file_delete_errors.extend(image_delete_errors)
                             for file_delete_error in file_delete_errors:
                                 logger.warning(file_delete_error)
                                 async with pipeline_status_lock:
@@ -2728,44 +3011,11 @@ def create_document_routes(
                     ),
                 )
 
-            # Async streaming write with size check
-            bytes_written = 0
-            chunk_size = 1024 * 1024  # 1MB chunks
-            needs_cleanup = False
-
-            async with aiofiles.open(file_path, "wb") as out_file:
-                while True:
-                    # Read chunk from upload stream
-                    chunk = await file.read(chunk_size)
-                    if not chunk:
-                        break
-
-                    # Check size limit during streaming (if not checked before)
-                    if (
-                        global_args.max_upload_size is not None
-                        and global_args.max_upload_size > 0
-                    ):
-                        bytes_written += len(chunk)
-                        if bytes_written > global_args.max_upload_size:
-                            needs_cleanup = True
-                            break
-
-                    # Write chunk to file
-                    await out_file.write(chunk)
-
-            # Cleanup after file is closed
-            if needs_cleanup:
-                try:
-                    file_path.unlink()
-                except Exception as cleanup_error:
-                    logger.error(
-                        f"Error cleaning up oversized file {safe_filename}: {cleanup_error}"
-                    )
-
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"File too large. Maximum size: {global_args.max_upload_size / 1024 / 1024:.1f}MB, uploaded: {bytes_written / 1024 / 1024:.1f}MB",
-                )
+            await _stream_upload_to_path(
+                file,
+                file_path,
+                max_upload_size=global_args.max_upload_size,
+            )
 
             track_id = generate_track_id("upload")
 
@@ -2808,6 +3058,166 @@ def create_document_routes(
             # any sibling bg task triggers its own processing pass.
             if slot_reserved:
                 await _release_enqueue_slot(rag)
+
+    @router.post(
+        "/upload_multimodal_case",
+        response_model=InsertResponse,
+        dependencies=[Depends(combined_auth)],
+    )
+    async def upload_multimodal_case_to_input_dir(
+        background_tasks: BackgroundTasks,
+        file: UploadFile = File(...),
+        images: list[UploadFile] | None = File(default=None),
+    ):
+        """Upload one text case plus optional linked images as a single unit."""
+        slot_reserved = False
+        background_task_scheduled = False
+        file_path: Path | None = None
+        case_image_dir: Path | None = None
+
+        try:
+            slot_reserved = await _reserve_enqueue_slot(rag)
+
+            if not file.filename:
+                raise HTTPException(status_code=400, detail="Filename cannot be empty")
+
+            safe_filename = sanitize_filename(file.filename, doc_manager.input_dir)
+            if not is_supported_multimodal_text_case(safe_filename):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Unsupported multimodal case file type. "
+                        "Use a text-based case file such as TXT or MD."
+                    ),
+                )
+
+            file_path = doc_manager.input_dir / safe_filename
+            existing_doc_data = await get_existing_doc_by_file_path_candidates(
+                rag.doc_status, file_path
+            )
+            if existing_doc_data:
+                status = get_doc_status_value(existing_doc_data) or "unknown"
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Document storage already contains '{safe_filename}' "
+                        f"(Status: {status}). Delete the existing record before re-uploading."
+                    ),
+                )
+
+            canonical_filename = normalize_file_path(safe_filename)
+            if file_path.exists():
+                existing_input_file: Path | None = file_path
+            else:
+                existing_input_file = find_existing_file_by_file_path(
+                    doc_manager.input_dir, canonical_filename
+                )
+            if existing_input_file:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Input directory already contains a file with the same "
+                        f"canonical basename ('{existing_input_file.name}'). "
+                        "Remove or rename it before re-uploading."
+                    ),
+                )
+
+            max_upload_size = _get_max_upload_size_bytes()
+            file_size = getattr(file, "size", None)
+            if (
+                max_upload_size is not None
+                and max_upload_size > 0
+                and file_size is not None
+                and file_size > max_upload_size
+            ):
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        "File too large. Maximum size: "
+                        f"{max_upload_size / 1024 / 1024:.1f}MB, "
+                        f"uploaded: {file_size / 1024 / 1024:.1f}MB"
+                    ),
+                )
+
+            await _stream_upload_to_path(
+                file,
+                file_path,
+                max_upload_size=max_upload_size,
+            )
+
+            case_image_dir = get_case_image_dir(doc_manager.input_dir, canonical_filename)
+            saved_image_paths = await save_case_images(
+                images,
+                case_image_dir,
+                max_images=get_multimodal_case_image_limit(),
+                max_upload_size=max_upload_size,
+            )
+
+            track_id = generate_track_id("upload_case")
+
+            async def _indexing_task():
+                try:
+                    await pipeline_index_multimodal_case(
+                        rag,
+                        file_path,
+                        track_id,
+                        saved_image_paths,
+                    )
+                finally:
+                    await _release_enqueue_slot(rag)
+
+            background_tasks.add_task(_indexing_task)
+            background_task_scheduled = True
+            slot_reserved = False
+
+            image_count = len(saved_image_paths)
+            image_suffix = (
+                f" with {image_count} attached image(s)"
+                if image_count
+                else ""
+            )
+            return InsertResponse(
+                status="success",
+                message=(
+                    f"File '{safe_filename}' uploaded successfully{image_suffix}. "
+                    "Processing will continue in background."
+                ),
+                track_id=track_id,
+            )
+        except HTTPException:
+            raise
+        except Exception as error:
+            logger.error(
+                "Error /documents/upload_multimodal_case: %s: %s",
+                getattr(file, "filename", "<unknown>"),
+                error,
+            )
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(error))
+        finally:
+            if slot_reserved:
+                await _release_enqueue_slot(rag)
+
+            if not background_task_scheduled:
+                if file_path is not None and file_path.exists():
+                    try:
+                        file_path.unlink()
+                    except Exception as cleanup_error:
+                        logger.error(
+                            "Failed to clean up multimodal case file %s: %s",
+                            file_path,
+                            cleanup_error,
+                        )
+
+                if case_image_dir is not None and case_image_dir.exists():
+                    try:
+                        shutil.rmtree(case_image_dir)
+                    except Exception as cleanup_error:
+                        logger.error(
+                            "Failed to clean up multimodal image dir %s: %s",
+                            case_image_dir,
+                            cleanup_error,
+                        )
 
     @router.post(
         "/text", response_model=InsertResponse, dependencies=[Depends(combined_auth)]
@@ -3200,9 +3610,12 @@ def create_document_routes(
                     "Starting to delete files in input directory"
                 )
 
-            # Delete only files in the current directory, preserve files in subdirectories
+            # Delete only files in the current directory, preserve files in
+            # unrelated subdirectories. The multimodal case image root is
+            # explicitly removed below.
             deleted_files_count = 0
             file_errors_count = 0
+            deleted_image_dir_count = 0
 
             for file_path in doc_manager.input_dir.glob("*"):
                 if file_path.is_file():
@@ -3212,6 +3625,19 @@ def create_document_routes(
                     except Exception as e:
                         logger.error(f"Error deleting file {file_path}: {str(e)}")
                         file_errors_count += 1
+
+            case_images_root = get_case_images_root(doc_manager.input_dir)
+            if case_images_root.exists():
+                try:
+                    shutil.rmtree(case_images_root)
+                    deleted_image_dir_count = 1
+                except Exception as e:
+                    logger.error(
+                        "Error deleting multimodal case image root %s: %s",
+                        case_images_root,
+                        e,
+                    )
+                    file_errors_count += 1
 
             # Log file deletion results
             if "history_messages" in pipeline_status:
@@ -3224,14 +3650,24 @@ def create_document_routes(
                     pipeline_status["history_messages"].append(
                         f"Successfully deleted {deleted_files_count} files"
                     )
+                if deleted_image_dir_count:
+                    pipeline_status["history_messages"].append(
+                        "Successfully deleted multimodal case image attachments"
+                    )
 
             # Prepare final result message
             final_message = ""
             if errors:
-                final_message = f"Cleared documents with some errors. Deleted {deleted_files_count} files."
+                final_message = (
+                    "Cleared documents with some errors. Deleted "
+                    f"{deleted_files_count} files."
+                )
                 status = "partial_success"
             else:
-                final_message = f"All documents cleared successfully. Deleted {deleted_files_count} files."
+                final_message = (
+                    "All documents cleared successfully. Deleted "
+                    f"{deleted_files_count} files."
+                )
                 status = "success"
 
             # Log final result

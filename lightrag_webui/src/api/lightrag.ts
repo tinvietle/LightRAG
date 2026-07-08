@@ -92,6 +92,7 @@ export type LightragStatus = {
     cosine_threshold: number
     min_rerank_score: number
     related_chunk_number: number
+    max_multimodal_case_images?: number
     role_llm_config?: Record<string, LightragRoleLLMConfig>
     vlm_process_enable?: boolean
     parser_routing?: string
@@ -890,6 +891,33 @@ export const uploadDocument = async (
   formData.append('file', file)
 
   const response = await axiosInstance.post('/documents/upload', formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data'
+    },
+    // prettier-ignore
+    onUploadProgress:
+      onUploadProgress !== undefined
+        ? (progressEvent) => {
+          const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total!)
+          onUploadProgress(percentCompleted)
+        }
+        : undefined
+  })
+  return response.data
+}
+
+export const uploadMultimodalCaseDocument = async (
+  file: File,
+  images: File[] = [],
+  onUploadProgress?: (percentCompleted: number) => void
+): Promise<DocActionResponse> => {
+  const formData = new FormData()
+  formData.append('file', file)
+  images.forEach((image) => {
+    formData.append('images', image)
+  })
+
+  const response = await axiosInstance.post('/documents/upload_multimodal_case', formData, {
     headers: {
       'Content-Type': 'multipart/form-data'
     },
