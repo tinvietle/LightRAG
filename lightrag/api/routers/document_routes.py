@@ -103,6 +103,9 @@ LEGACY_EMPTY_FILE_PATH_SENTINELS = {"", "no-file-path"}
 ARCHIVED_FILE_SUFFIX_RE = re.compile(r"_(?:\d{3}|\d{10,})$")
 MULTIMODAL_CASE_IMAGES_DIRNAME = "images"
 DEFAULT_MULTIMODAL_CASE_IMAGE_LIMIT = 10
+MULTIMODAL_IMAGE_SUFFIXES: frozenset[str] = frozenset(
+    {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+)
 MULTIMODAL_TEXT_CASE_EXTENSIONS: frozenset[str] = frozenset(
     {
         ".txt",
@@ -245,6 +248,10 @@ def get_case_image_dir(input_dir: Path, case_file_path: str) -> Path:
 def _validate_image_upload(image: UploadFile) -> None:
     content_type = (image.content_type or "").strip().lower()
     if content_type.startswith("image/"):
+        return
+
+    suffix = Path(image.filename or "").suffix.lower()
+    if suffix in MULTIMODAL_IMAGE_SUFFIXES:
         return
 
     mime_type, _ = mimetypes.guess_type(image.filename or "")
