@@ -125,7 +125,7 @@ def upload_case_without_images(client: httpx.Client, json_path: Path) -> bool:
 def parse_args() -> tuple[Path, bool]:
     parser = argparse.ArgumentParser(description="Upload multimodal cases to LightRAG.")
     parser.add_argument(
-        "dataset_path",
+        "--dataset-path",
         type=Path,
         help="Path to the dataset directory containing JSON and image files.",
     )
