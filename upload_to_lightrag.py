@@ -5,9 +5,10 @@ import os
 from pathlib import Path
 
 import httpx
+import argparse
 
 
-dataset_path = Path(__file__).resolve().parent / "../dataset/fold1/train"
+# dataset_path = Path(__file__).resolve().parent / "../dataset/fold1/train"
 base_url = os.getenv("LIGHTRAG_API_BASE_URL", "http://127.0.0.1:9621")
 api_key = os.getenv("LIGHTRAG_API_KEY")
 max_images = int(os.getenv("MAX_MULTIMODAL_CASE_IMAGES", "10"))
@@ -88,9 +89,55 @@ def upload_case(client: httpx.Client, json_path: Path, image_paths: list[Path]) 
     finally:
         for handle in open_files:
             handle.close()
+            
+def upload_case_without_images(client: httpx.Client, json_path: Path) -> bool:
+    files: list[tuple[str, tuple[str, object, str]]] = []
+    open_files = []
+
+    try:
+        text_file = json_path.open("rb")
+        open_files.append(text_file)
+        files.append(("file", (json_path.name, text_file, "application/json")))
+
+        response = client.post("/documents/upload_multimodal_case", files=files)
+
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"detail": response.text}
+
+        status = payload.get("status", "unknown")
+        track_id = payload.get("track_id", "")
+
+        if response.is_success:
+            print(f"OK   {json_path} -> {status} track_id={track_id}")
+            print(f"Sent {len(files)} files: {[f[1][0] for f in files]}")
+            return True
+
+        detail = payload.get("detail") or payload.get("message") or response.text
+        print(f"FAIL {json_path} -> HTTP {response.status_code}: {detail}")
+        return False
+    finally:
+        for handle in open_files:
+            handle.close()
 
 
-def main(root: Path) -> None:
+def parse_args() -> tuple[Path, bool]:
+    parser = argparse.ArgumentParser(description="Upload multimodal cases to LightRAG.")
+    parser.add_argument(
+        "dataset_path",
+        type=Path,
+        help="Path to the dataset directory containing JSON and image files.",
+    )
+    parser.add_argument(
+        "--use-without-images",
+        action="store_true",
+        help="Upload cases without images (only JSON files).",
+    )
+    args = parser.parse_args()
+    return args.dataset_path, args.use_without_images
+
+def main(root: Path, use_without_images: bool) -> None:
     if not root.exists():
         raise FileNotFoundError(f"Dataset path does not exist: {root}")
 
@@ -107,7 +154,12 @@ def main(root: Path) -> None:
                 print(f"WARN {json_path} -> no linked image files found")
 
             try:
-                if upload_case(client, json_path, image_paths):
+                if use_without_images:
+                    success = upload_case_without_images(client, json_path)
+                else:
+                    success = upload_case(client, json_path, image_paths)
+
+                if success:
                     uploaded += 1
                 else:
                     skipped += 1
@@ -119,4 +171,5 @@ def main(root: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(dataset_path)
+    dataset_path, use_without_images = parse_args()
+    main(dataset_path, use_without_images)
