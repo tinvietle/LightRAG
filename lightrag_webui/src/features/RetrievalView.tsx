@@ -9,11 +9,38 @@ import { useSettingsStore } from '@/stores/settings'
 import { useDebounce } from '@/hooks/useDebounce'
 import QuerySettings from '@/components/retrieval/QuerySettings'
 import { ChatMessage, MessageWithError } from '@/components/retrieval/ChatMessage'
-import { EraserIcon, SendIcon, CopyIcon, SquareIcon } from 'lucide-react'
+import { EraserIcon, SendIcon, CopyIcon, ImagePlusIcon, SquareIcon, XIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { copyToClipboard } from '@/utils/clipboard'
 import type { QueryMode } from '@/api/lightrag'
+import { multimodalImageFileTypes } from '@/lib/constants'
+
+const MAX_QUERY_IMAGES = 10
+const QUERY_IMAGE_ACCEPT = Object.values(multimodalImageFileTypes).flat().join(',')
+const QUERY_IMAGE_MIME_TYPES = new Set(Object.keys(multimodalImageFileTypes))
+
+const isSupportedQueryImage = (file: File): boolean => {
+  if (QUERY_IMAGE_MIME_TYPES.has(file.type)) {
+    return true
+  }
+  const extension = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`
+  return Object.values(multimodalImageFileTypes).flat().includes(extension)
+}
+
+const readImageAsDataUrl = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error ?? new Error(`Unable to read ${file.name}`))
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        reject(new Error(`Unable to encode ${file.name}`))
+        return
+      }
+      resolve(reader.result)
+    }
+    reader.readAsDataURL(file)
+  })
 
 // Helper function to generate unique IDs with browser compatibility
 const generateUniqueId = () => {
@@ -138,6 +165,7 @@ export default function RetrievalView() {
     }
   })
   const [inputValue, setInputValue] = useState('')
+  const [queryImages, setQueryImages] = useState<File[]>([])
   const [isLoading, setIsLoading] = useState(false)
   // Briefly disable the Stop button right after a query starts so a fast
   // double-click on Send (which morphs into Stop at the same position) can't
@@ -146,6 +174,7 @@ export default function RetrievalView() {
   const stopCooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [inputError, setInputError] = useState('') // Error message for input
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null)
+  const imageInputRef = useRef<HTMLInputElement>(null)
 
   // Smart switching logic: use Input for single line, Textarea for multi-line
   const hasMultipleLines = inputValue.includes('\n')
@@ -161,6 +190,33 @@ export default function RetrievalView() {
     requestAnimationFrame(() => {
       element.style.height = 'auto'
       element.style.height = Math.min(element.scrollHeight, 120) + 'px'
+    })
+  }, [])
+
+  const handleQueryImagesChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFiles = Array.from(event.target.files ?? [])
+    event.target.value = ''
+
+    const unsupportedFiles = selectedFiles.filter((file) => !isSupportedQueryImage(file))
+    if (unsupportedFiles.length > 0) {
+      toast.error('Only PNG, JPG, JPEG, WEBP, GIF, and BMP images can be attached.')
+    }
+
+    const supportedFiles = selectedFiles.filter(isSupportedQueryImage)
+    if (!supportedFiles.length) {
+      return
+    }
+
+    setQueryImages((currentImages) => {
+      const existingNames = new Set(currentImages.map((file) => file.name))
+      const newImages = supportedFiles.filter((file) => !existingNames.has(file.name))
+      const availableSlots = MAX_QUERY_IMAGES - currentImages.length
+
+      if (newImages.length > availableSlots) {
+        toast.error(`You can attach up to ${MAX_QUERY_IMAGES} images to a query.`)
+      }
+
+      return [...currentImages, ...newImages.slice(0, Math.max(availableSlots, 0))]
     })
   }, [])
 
@@ -181,6 +237,14 @@ export default function RetrievalView() {
     async (e: React.FormEvent) => {
       e.preventDefault()
       if (!inputValue.trim() || isLoading) return
+
+      let encodedImages: string[]
+      try {
+        encodedImages = await Promise.all(queryImages.map(readImageAsDataUrl))
+      } catch (error) {
+        toast.error(`Unable to read query image: ${errorMessage(error)}`)
+        return
+      }
 
       // Parse query mode prefix
       const allowedModes: QueryMode[] = ['naive', 'local', 'global', 'hybrid', 'mix', 'bypass']
@@ -259,6 +323,7 @@ export default function RetrievalView() {
 
       // Clear input and set loading
       setInputValue('')
+      setQueryImages([])
       setIsLoading(true)
       // Disable the Stop button for a short cooldown so a fast double-click on
       // Send doesn't immediately abort this query. Set synchronously (same batch
@@ -375,6 +440,7 @@ export default function RetrievalView() {
       const queryParams = {
         ...state.querySettings,
         query: actualQuery,
+        ...(encodedImages.length ? { images: encodedImages } : {}),
         response_type: 'Multiple Paragraphs',
         conversation_history: effectiveHistoryTurns > 0
           ? prevMessages
@@ -460,7 +526,7 @@ export default function RetrievalView() {
         }
       }
     },
-    [inputValue, isLoading, messages, setMessages, t, scrollToBottom]
+    [inputValue, isLoading, messages, queryImages, setMessages, t, scrollToBottom]
   )
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -851,6 +917,26 @@ export default function RetrievalView() {
             <EraserIcon />
             {t('retrievePanel.retrieval.clear')}
           </Button>
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept={QUERY_IMAGE_ACCEPT}
+            multiple
+            className="sr-only"
+            onChange={handleQueryImagesChange}
+            disabled={isLoading}
+          />
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => imageInputRef.current?.click()}
+            disabled={isLoading}
+            size="sm"
+            tooltip="Attach query images"
+          >
+            <ImagePlusIcon />
+            {queryImages.length > 0 ? `${queryImages.length}/${MAX_QUERY_IMAGES}` : 'Images'}
+          </Button>
           <div className="flex-1 relative">
             <label htmlFor="query-input" className="sr-only">
               {t('retrievePanel.retrieval.placeholder')}
@@ -901,6 +987,24 @@ export default function RetrievalView() {
               <div className="absolute left-0 top-full mt-1 text-xs text-red-500">{inputError}</div>
             )}
           </div>
+          {queryImages.length > 0 && (
+            <div className="flex max-w-[220px] items-center gap-1 overflow-x-auto text-xs text-muted-foreground">
+              <span className="truncate" title={queryImages.map((file) => file.name).join(', ')}>
+                {queryImages.map((file) => file.name).join(', ')}
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-6 shrink-0"
+                onClick={() => setQueryImages([])}
+                disabled={isLoading}
+                tooltip="Remove attached images"
+              >
+                <XIcon />
+              </Button>
+            </div>
+          )}
           {isLoading ? (
             <Button type="button" variant="destructive" onClick={handleStop} disabled={stopDisabled} size="sm">
               <SquareIcon />

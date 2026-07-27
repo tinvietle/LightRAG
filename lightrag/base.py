@@ -139,6 +139,14 @@ class QueryParam:
     Format: [{"role": "user/assistant", "content": "message"}].
     """
 
+    image_inputs: list[str] = field(default_factory=list)
+    """Base64 strings or data URLs for images sent with this query to the query LLM.
+
+    Images are never used for retrieval. They are provided alongside the final
+    grounded prompt so a configured vision-capable query model can incorporate
+    the user's attached visual evidence in its response.
+    """
+
     user_prompt: str | None = None
     """User-provided prompt for the query.
     Addition instructions for LLM. If provided, this will be inject into the prompt template.

@@ -63,6 +63,7 @@ from lightrag.chunk_schema import (
     strip_internal_multimodal_markup_for_extraction,
 )
 from lightrag.kg.ner import extract_entity_labels_from_guidance, recognize_entities
+from lightrag.llm._vision_utils import image_cache_metadata, normalize_image_inputs
 from lightrag.prompt import PROMPTS, resolve_entity_extraction_prompt_profile
 from lightrag.constants import (
     GRAPH_FIELD_SEP,
@@ -3936,6 +3937,12 @@ async def kg_query(
 
     user_query = query
 
+    query_image_cache_metadata = (
+        image_cache_metadata(normalize_image_inputs(query_param.image_inputs))
+        if query_param.image_inputs
+        else []
+    )
+
     if query_param.only_need_prompt:
         prompt_content = "\n\n".join([sys_prompt, "---User Query---", user_query])
         return QueryResult(content=prompt_content, raw_data=context_result.raw_data)
@@ -3962,6 +3969,7 @@ async def kg_query(
         query_param.user_prompt or "",
         query_param.enable_rerank,
         global_config.get("enable_content_headings", False),
+        query_image_cache_metadata,
         "\n<llm_identity>\n",
         serialize_llm_cache_identity(llm_cache_identity),
     )
@@ -3981,6 +3989,7 @@ async def kg_query(
             user_query,
             system_prompt=sys_prompt,
             history_messages=query_param.conversation_history,
+            image_inputs=query_param.image_inputs,
             enable_cot=True,
             stream=query_param.stream,
         )
@@ -4001,6 +4010,7 @@ async def kg_query(
                 "enable_content_headings": global_config.get(
                     "enable_content_headings", False
                 ),
+                "images": query_image_cache_metadata,
             }
             await save_to_cache(
                 hashing_kv,
@@ -5947,6 +5957,12 @@ async def naive_query(
 
     user_query = query
 
+    query_image_cache_metadata = (
+        image_cache_metadata(normalize_image_inputs(query_param.image_inputs))
+        if query_param.image_inputs
+        else []
+    )
+
     if query_param.only_need_prompt:
         prompt_content = "\n\n".join([sys_prompt, "---User Query---", user_query])
         return QueryResult(content=prompt_content, raw_data=raw_data)
@@ -5964,6 +5980,7 @@ async def naive_query(
         query_param.user_prompt or "",
         query_param.enable_rerank,
         global_config.get("enable_content_headings", False),
+        query_image_cache_metadata,
         "\n<llm_identity>\n",
         serialize_llm_cache_identity(llm_cache_identity),
     )
@@ -5981,6 +5998,7 @@ async def naive_query(
             user_query,
             system_prompt=sys_prompt,
             history_messages=query_param.conversation_history,
+            image_inputs=query_param.image_inputs,
             enable_cot=True,
             stream=query_param.stream,
         )
@@ -5999,6 +6017,7 @@ async def naive_query(
                 "enable_content_headings": global_config.get(
                     "enable_content_headings", False
                 ),
+                "images": query_image_cache_metadata,
             }
             await save_to_cache(
                 hashing_kv,

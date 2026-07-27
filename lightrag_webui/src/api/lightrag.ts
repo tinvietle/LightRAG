@@ -181,6 +181,8 @@ export type Message = {
 
 export type QueryRequest = {
   query: string
+  /** Base64 image data or data URLs sent with the final query LLM prompt. */
+  images?: string[]
   /** Specifies the retrieval mode. */
   mode: QueryMode
   /** If True, only returns the retrieved context without generating a response. */

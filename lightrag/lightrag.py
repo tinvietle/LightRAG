@@ -2406,6 +2406,7 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
                     query.strip(),
                     system_prompt=system_prompt,
                     history_messages=param.conversation_history,
+                    image_inputs=param.image_inputs,
                     enable_cot=True,
                     stream=param.stream,
                 )

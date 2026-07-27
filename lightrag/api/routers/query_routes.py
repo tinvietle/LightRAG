@@ -7,8 +7,12 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from lightrag.base import QueryParam
 from lightrag.api.utils_api import get_combined_auth_dependency
+from lightrag.llm._vision_utils import normalize_image_inputs
 from lightrag.utils import logger
 from pydantic import BaseModel, Field, field_validator
+
+
+MAX_QUERY_IMAGES = 10
 
 
 class QueryRequest(BaseModel):
@@ -83,6 +87,15 @@ class QueryRequest(BaseModel):
         description="History messages are only sent to LLM for context, not used for retrieval. Format: [{'role': 'user/assistant', 'content': 'message'}].",
     )
 
+    images: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_QUERY_IMAGES,
+        description=(
+            "Up to 10 base64-encoded images or data URLs to send with the final "
+            "query LLM prompt. Supported formats: PNG, JPEG, WEBP, GIF, and BMP."
+        ),
+    )
+
     user_prompt: Optional[str] = Field(
         default=None,
         description="User-provided prompt for the query. If provided, this will be used instead of the default value from prompt template.",
@@ -127,13 +140,24 @@ class QueryRequest(BaseModel):
                 raise ValueError("Each message 'role' must be a non-empty string.")
         return conversation_history
 
+    @field_validator("images")
+    @classmethod
+    def images_are_valid(cls, images: list[str]) -> list[str]:
+        try:
+            normalize_image_inputs(images)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Invalid query image: {error}") from error
+        return images
+
     def to_query_params(self, is_stream: bool) -> "QueryParam":
         """Converts a QueryRequest instance into a QueryParam instance."""
         # Use Pydantic's `.model_dump(exclude_none=True)` to remove None values automatically
         # Exclude API-level parameters that don't belong in QueryParam
         request_data = self.model_dump(
-            exclude_none=True, exclude={"query", "include_chunk_content"}
+            exclude_none=True,
+            exclude={"query", "include_chunk_content", "images"},
         )
+        request_data["image_inputs"] = self.images
 
         # Ensure `mode` and `stream` are set explicitly
         param = QueryParam(**request_data)

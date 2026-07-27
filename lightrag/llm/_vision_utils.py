@@ -36,6 +36,7 @@ _JPEG_SIGNATURE = b"\xff\xd8\xff"
 _GIF_SIGNATURES = (b"GIF87a", b"GIF89a")
 _WEBP_RIFF = b"RIFF"
 _WEBP_TAG = b"WEBP"
+_BMP_SIGNATURE = b"BM"
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,8 @@ def _detect_mime(raw: bytes) -> str:
         return "image/gif"
     if len(raw) >= 12 and raw[0:4] == _WEBP_RIFF and raw[8:12] == _WEBP_TAG:
         return "image/webp"
+    if raw.startswith(_BMP_SIGNATURE):
+        return "image/bmp"
     return "image/png"
 
 
