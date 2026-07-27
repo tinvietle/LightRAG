@@ -269,6 +269,19 @@ export const ChatMessage = ({
           </div>
         </div>
       )}
+      {message.role === 'user' && message.imagePreviews?.length ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {message.imagePreviews.map((preview, index) => (
+            <img
+              key={`${message.id}-image-${index}`}
+              src={preview}
+              alt={`Attached image ${index + 1}`}
+              className="size-[72px] rounded-md border border-primary-foreground/30 object-cover shadow-sm"
+              loading="lazy"
+            />
+          ))}
+        </div>
+      ) : null}
       {/* User-terminated hint - response may be incomplete */}
       {message.isAborted && (
         <div className="mt-1 text-xs italic text-muted-foreground">

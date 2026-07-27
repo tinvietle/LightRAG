@@ -18,6 +18,7 @@ import type { QueryMode } from '@/api/lightrag'
 import { multimodalImageFileTypes } from '@/lib/constants'
 
 const DEFAULT_MAX_QUERY_IMAGES = 10
+const QUERY_IMAGE_PREVIEW_SIZE = 72
 const QUERY_IMAGE_ACCEPT = Object.values(multimodalImageFileTypes).flat().join(',')
 const QUERY_IMAGE_MIME_TYPES = new Set(Object.keys(multimodalImageFileTypes))
 
@@ -42,6 +43,41 @@ const readImageAsDataUrl = (file: File): Promise<string> =>
     }
     reader.readAsDataURL(file)
   })
+
+const createImagePreview = async (file: File): Promise<string> => {
+  const source = await readImageAsDataUrl(file)
+  const image = new Image()
+
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve()
+    image.onerror = () => reject(new Error(`Unable to create preview for ${file.name}`))
+    image.src = source
+  })
+
+  const canvas = document.createElement('canvas')
+  canvas.width = QUERY_IMAGE_PREVIEW_SIZE
+  canvas.height = QUERY_IMAGE_PREVIEW_SIZE
+  const context = canvas.getContext('2d')
+  if (!context) {
+    throw new Error(`Unable to create preview for ${file.name}`)
+  }
+
+  const scale = Math.max(
+    QUERY_IMAGE_PREVIEW_SIZE / image.naturalWidth,
+    QUERY_IMAGE_PREVIEW_SIZE / image.naturalHeight
+  )
+  const width = image.naturalWidth * scale
+  const height = image.naturalHeight * scale
+  context.drawImage(
+    image,
+    (QUERY_IMAGE_PREVIEW_SIZE - width) / 2,
+    (QUERY_IMAGE_PREVIEW_SIZE - height) / 2,
+    width,
+    height
+  )
+
+  return canvas.toDataURL('image/webp', 0.75)
+}
 
 // Helper function to generate unique IDs with browser compatibility
 const generateUniqueId = () => {
@@ -167,6 +203,7 @@ export default function RetrievalView() {
   })
   const [inputValue, setInputValue] = useState('')
   const [queryImages, setQueryImages] = useState<File[]>([])
+  const [queryImagePreviews, setQueryImagePreviews] = useState<string[]>([])
   const [isLoading, setIsLoading] = useState(false)
   // Briefly disable the Stop button right after a query starts so a fast
   // double-click on Send (which morphs into Stop at the same position) can't
@@ -178,6 +215,31 @@ export default function RetrievalView() {
   const imageInputRef = useRef<HTMLInputElement>(null)
   const healthStatus = useBackendState.use.status()
   const maxQueryImages = healthStatus?.configuration?.max_query_images ?? DEFAULT_MAX_QUERY_IMAGES
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (!queryImages.length) {
+      return undefined
+    }
+
+    void Promise.all(queryImages.map(createImagePreview))
+      .then((previews) => {
+        if (!cancelled) {
+          setQueryImagePreviews(previews)
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.error('Unable to create query image previews:', error)
+          setQueryImagePreviews([])
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [queryImages])
 
   // Smart switching logic: use Input for single line, Textarea for multi-line
   const hasMultipleLines = inputValue.includes('\n')
@@ -242,8 +304,12 @@ export default function RetrievalView() {
       if (!inputValue.trim() || isLoading) return
 
       let encodedImages: string[]
+      let imagePreviews: string[]
       try {
-        encodedImages = await Promise.all(queryImages.map(readImageAsDataUrl))
+        [encodedImages, imagePreviews] = await Promise.all([
+          Promise.all(queryImages.map(readImageAsDataUrl)),
+          Promise.all(queryImages.map(createImagePreview))
+        ])
       } catch (error) {
         toast.error(`Unable to read query image: ${errorMessage(error)}`)
         return
@@ -288,7 +354,8 @@ export default function RetrievalView() {
       const userMessage: MessageWithError = {
         id: generateUniqueId(), // Use browser-compatible ID generation
         content: inputValue,
-        role: 'user'
+        role: 'user',
+        ...(imagePreviews.length ? { imagePreviews } : {})
       }
 
       const assistantMessage: MessageWithError = {
@@ -327,6 +394,7 @@ export default function RetrievalView() {
       // Clear input and set loading
       setInputValue('')
       setQueryImages([])
+      setQueryImagePreviews([])
       setIsLoading(true)
       // Disable the Stop button for a short cooldown so a fast double-click on
       // Send doesn't immediately abort this query. Set synchronously (same batch
@@ -991,21 +1059,33 @@ export default function RetrievalView() {
             )}
           </div>
           {queryImages.length > 0 && (
-            <div className="flex max-w-[220px] items-center gap-1 overflow-x-auto text-xs text-muted-foreground">
-              <span className="truncate" title={queryImages.map((file) => file.name).join(', ')}>
-                {queryImages.map((file) => file.name).join(', ')}
-              </span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="size-6 shrink-0"
-                onClick={() => setQueryImages([])}
-                disabled={isLoading}
-                tooltip="Remove attached images"
-              >
-                <XIcon />
-              </Button>
+            <div className="flex max-w-[300px] items-center gap-1 overflow-x-auto py-1" aria-label="Attached query images">
+              {queryImages.map((file, index) => (
+                <div key={`${file.name}-${file.lastModified}`} className="group relative size-10 shrink-0 overflow-hidden rounded-md border border-border bg-muted shadow-sm">
+                  {queryImagePreviews[index] ? (
+                    <img
+                      src={queryImagePreviews[index]}
+                      alt={file.name}
+                      className="size-full object-cover"
+                    />
+                  ) : (
+                    <div className="size-full animate-pulse bg-muted-foreground/10" />
+                  )}
+                  <button
+                    type="button"
+                    className="absolute right-0.5 top-0.5 grid size-4 place-items-center rounded-full bg-background/90 text-foreground opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus:opacity-100"
+                    onClick={() => {
+                      setQueryImages((currentImages) => currentImages.filter((_, imageIndex) => imageIndex !== index))
+                      setQueryImagePreviews((currentPreviews) => currentPreviews.filter((_, imageIndex) => imageIndex !== index))
+                    }}
+                    disabled={isLoading}
+                    aria-label={`Remove ${file.name}`}
+                    title={`Remove ${file.name}`}
+                  >
+                    <XIcon className="size-3" />
+                  </button>
+                </div>
+              ))}
             </div>
           )}
           {isLoading ? (

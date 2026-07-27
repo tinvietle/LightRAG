@@ -175,6 +175,8 @@ export type QueryMode = 'naive' | 'local' | 'global' | 'hybrid' | 'mix' | 'bypas
 export type Message = {
   role: 'user' | 'assistant' | 'system'
   content: string
+  /** Compact image thumbnails retained with user messages in local history. */
+  imagePreviews?: string[]
   thinkingContent?: string
   displayContent?: string
   thinkingTime?: number | null
