@@ -9,10 +9,12 @@ from typing import Any, Awaitable, Callable
 import json_repair
 
 from lightrag.prompt_multimodal import MULTIMODAL_PROMPTS
+from lightrag.llm._vision_utils import normalize_image_inputs
 from lightrag.utils import logger
 
 
 MULTIMODAL_CASE_IMAGE_HEADER = "Attached image descriptions:"
+QUERY_IMAGE_DESCRIPTION_HEADER = "Image descriptions:"
 _FENCED_JSON_RE = re.compile(r"^```(?:json)?\s*\n(.*?)\n```$", re.DOTALL)
 
 _TEXT_FILE_ENCODINGS: tuple[str, ...] = (
@@ -129,6 +131,89 @@ async def describe_image_paths_with_vlm(
             )
 
     return descriptions
+
+
+async def describe_query_images_with_vlm(
+    image_inputs: list[str],
+    use_vlm_func: Callable[..., Awaitable[str]] | None,
+    language: str,
+    *,
+    max_images: int,
+) -> list[str]:
+    """Describe attached query images for retrieval-side query augmentation."""
+    if not image_inputs or use_vlm_func is None:
+        return []
+
+    descriptions: list[str] = []
+    normalized_images = normalize_image_inputs(image_inputs)
+
+    for image in normalized_images[:max_images]:
+        try:
+            source_id = image.source_id or f"query_image_{image.index + 1}"
+            prompt = MULTIMODAL_PROMPTS["image_analysis"].format(
+                language=language,
+                content="",
+                captions="n/a",
+                footnotes="n/a",
+                leading="n/a",
+                trailing="n/a",
+                item_id=source_id,
+                file_path=image.source_file or source_id,
+            )
+            response_text = await use_vlm_func(
+                prompt,
+                stream=False,
+                image_inputs=[
+                    {
+                        "base64": image.base64_str,
+                        "mime_type": image.mime_type,
+                        "source_id": source_id,
+                        "source_file": image.source_file,
+                        "modality": "image",
+                    }
+                ],
+                response_format={"type": "json_object"},
+            )
+            description = _extract_image_description(_extract_json_object(response_text))
+            if description:
+                descriptions.append(description)
+        except Exception as error:
+            logger.warning(
+                "[query_images] failed to describe image %s: %s",
+                image.index + 1,
+                error,
+            )
+
+    return descriptions
+
+
+async def augment_query_with_image_descriptions(
+    query: str,
+    image_inputs: list[str],
+    use_vlm_func: Callable[..., Awaitable[str]] | None,
+    language: str,
+    *,
+    max_images: int,
+) -> str:
+    """Append VLM descriptions to a query while leaving raw images available."""
+    descriptions = await describe_query_images_with_vlm(
+        image_inputs,
+        use_vlm_func,
+        language,
+        max_images=max_images,
+    )
+    if not descriptions:
+        return query.strip()
+
+    description_block = "\n".join(
+        f"- Image {index}: {description}"
+        for index, description in enumerate(descriptions, start=1)
+        if description.strip()
+    )
+    if not description_block:
+        return query.strip()
+
+    return f"{query.strip()}\n\n{QUERY_IMAGE_DESCRIPTION_HEADER}\n{description_block}"
 
 
 async def augment_text_with_image_descriptions(

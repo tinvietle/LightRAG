@@ -6,6 +6,7 @@ import { throttle } from '@/lib/utils'
 import { queryText, queryTextStream } from '@/api/lightrag'
 import { errorMessage } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settings'
+import { useBackendState } from '@/stores/state'
 import { useDebounce } from '@/hooks/useDebounce'
 import QuerySettings from '@/components/retrieval/QuerySettings'
 import { ChatMessage, MessageWithError } from '@/components/retrieval/ChatMessage'
@@ -16,7 +17,7 @@ import { copyToClipboard } from '@/utils/clipboard'
 import type { QueryMode } from '@/api/lightrag'
 import { multimodalImageFileTypes } from '@/lib/constants'
 
-const MAX_QUERY_IMAGES = 10
+const DEFAULT_MAX_QUERY_IMAGES = 10
 const QUERY_IMAGE_ACCEPT = Object.values(multimodalImageFileTypes).flat().join(',')
 const QUERY_IMAGE_MIME_TYPES = new Set(Object.keys(multimodalImageFileTypes))
 
@@ -175,6 +176,8 @@ export default function RetrievalView() {
   const [inputError, setInputError] = useState('') // Error message for input
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
+  const healthStatus = useBackendState.use.status()
+  const maxQueryImages = healthStatus?.configuration?.max_query_images ?? DEFAULT_MAX_QUERY_IMAGES
 
   // Smart switching logic: use Input for single line, Textarea for multi-line
   const hasMultipleLines = inputValue.includes('\n')
@@ -210,15 +213,15 @@ export default function RetrievalView() {
     setQueryImages((currentImages) => {
       const existingNames = new Set(currentImages.map((file) => file.name))
       const newImages = supportedFiles.filter((file) => !existingNames.has(file.name))
-      const availableSlots = MAX_QUERY_IMAGES - currentImages.length
+      const availableSlots = maxQueryImages - currentImages.length
 
       if (newImages.length > availableSlots) {
-        toast.error(`You can attach up to ${MAX_QUERY_IMAGES} images to a query.`)
+        toast.error(`You can attach up to ${maxQueryImages} images to a query.`)
       }
 
       return [...currentImages, ...newImages.slice(0, Math.max(availableSlots, 0))]
     })
-  }, [])
+  }, [maxQueryImages])
 
   // Scroll to bottom function - restored smooth scrolling with better handling
   const scrollToBottom = useCallback(() => {
@@ -935,7 +938,7 @@ export default function RetrievalView() {
             tooltip="Attach query images"
           >
             <ImagePlusIcon />
-            {queryImages.length > 0 ? `${queryImages.length}/${MAX_QUERY_IMAGES}` : 'Images'}
+            {queryImages.length > 0 ? `${queryImages.length}/${maxQueryImages}` : 'Images'}
           </Button>
           <div className="flex-1 relative">
             <label htmlFor="query-input" className="sr-only">

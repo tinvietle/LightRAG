@@ -8,11 +8,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from lightrag.base import QueryParam
 from lightrag.api.utils_api import get_combined_auth_dependency
 from lightrag.llm._vision_utils import normalize_image_inputs
-from lightrag.utils import logger
+from lightrag.utils import get_env_value, logger
 from pydantic import BaseModel, Field, field_validator
 
 
-MAX_QUERY_IMAGES = 10
+MAX_QUERY_IMAGES = get_env_value(
+    "MAX_QUERY_IMAGES",
+    get_env_value("MAX_MULTIMODAL_CASE_IMAGES", 10, int),
+    int,
+)
 
 
 class QueryRequest(BaseModel):
@@ -89,9 +93,8 @@ class QueryRequest(BaseModel):
 
     images: list[str] = Field(
         default_factory=list,
-        max_length=MAX_QUERY_IMAGES,
         description=(
-            "Up to 10 base64-encoded images or data URLs to send with the final "
+            "Base64-encoded images or data URLs sent with the final "
             "query LLM prompt. Supported formats: PNG, JPEG, WEBP, GIF, and BMP."
         ),
     )
@@ -143,11 +146,16 @@ class QueryRequest(BaseModel):
     @field_validator("images")
     @classmethod
     def images_are_valid(cls, images: list[str]) -> list[str]:
+        clean_images = [image.strip() for image in images if image.strip()]
+        if len(clean_images) > MAX_QUERY_IMAGES:
+            raise ValueError(
+                f"A maximum of {MAX_QUERY_IMAGES} images can be attached to a query."
+            )
         try:
-            normalize_image_inputs(images)
+            normalize_image_inputs(clean_images)
         except (TypeError, ValueError) as error:
             raise ValueError(f"Invalid query image: {error}") from error
-        return images
+        return clean_images
 
     def to_query_params(self, is_stream: bool) -> "QueryParam":
         """Converts a QueryRequest instance into a QueryParam instance."""

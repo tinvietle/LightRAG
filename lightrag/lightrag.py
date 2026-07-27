@@ -77,6 +77,7 @@ from lightrag.constants import (
     DEFAULT_FILE_PATH_MORE_PLACEHOLDER,
 )
 from lightrag.utils import get_env_value
+from lightrag.multimodal_case import augment_query_with_image_descriptions
 
 from lightrag.kg import (
     verify_storage_implementation,
@@ -2400,10 +2401,17 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
                     global_config["role_llm_funcs"]["query"],
                     _priority=DEFAULT_SUMMARY_PRIORITY,
                 )
+                query_for_llm = await augment_query_with_image_descriptions(
+                    query,
+                    param.image_inputs,
+                    global_config["role_llm_funcs"].get("vlm"),
+                    self._resolved_summary_language,
+                    max_images=len(param.image_inputs),
+                )
 
                 param.stream = True if param.stream is None else param.stream
                 response = await use_llm_func(
-                    query.strip(),
+                    query_for_llm,
                     system_prompt=system_prompt,
                     history_messages=param.conversation_history,
                     image_inputs=param.image_inputs,

@@ -93,6 +93,7 @@ export type LightragStatus = {
     min_rerank_score: number
     related_chunk_number: number
     max_multimodal_case_images?: number
+    max_query_images?: number
     role_llm_config?: Record<string, LightragRoleLLMConfig>
     vlm_process_enable?: boolean
     parser_routing?: string

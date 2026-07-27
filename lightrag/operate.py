@@ -64,6 +64,7 @@ from lightrag.chunk_schema import (
 )
 from lightrag.kg.ner import extract_entity_labels_from_guidance, recognize_entities
 from lightrag.llm._vision_utils import image_cache_metadata, normalize_image_inputs
+from lightrag.multimodal_case import augment_query_with_image_descriptions
 from lightrag.prompt import PROMPTS, resolve_entity_extraction_prompt_profile
 from lightrag.constants import (
     GRAPH_FIELD_SEP,
@@ -3875,8 +3876,16 @@ async def kg_query(
     )
     llm_cache_identity = get_llm_cache_identity(global_config, "query")
 
+    query_for_pipeline = await augment_query_with_image_descriptions(
+        query,
+        query_param.image_inputs,
+        global_config["role_llm_funcs"].get("vlm"),
+        global_config.get("_resolved_summary_language", "English"),
+        max_images=len(query_param.image_inputs),
+    )
+
     hl_keywords, ll_keywords = await get_keywords_from_query(
-        query, query_param, global_config, hashing_kv
+        query_for_pipeline, query_param, global_config, hashing_kv
     )
 
     logger.debug(f"High-level keywords: {hl_keywords}")
@@ -3888,9 +3897,11 @@ async def kg_query(
     if hl_keywords == [] and query_param.mode in ["global", "hybrid", "mix"]:
         logger.warning("high_level_keywords is empty")
     if hl_keywords == [] and ll_keywords == []:
-        if len(query) < 50:
-            logger.warning(f"Forced low_level_keywords to origin query: {query}")
-            ll_keywords = [query]
+        if len(query_for_pipeline) < 50:
+            logger.warning(
+                "Forced low_level_keywords to query text: %s", query_for_pipeline
+            )
+            ll_keywords = [query_for_pipeline]
         else:
             return QueryResult(content=PROMPTS["fail_response"])
 
@@ -3899,7 +3910,7 @@ async def kg_query(
 
     # Build query context (unified interface)
     context_result = await _build_query_context(
-        query,
+        query_for_pipeline,
         ll_keywords_str,
         hl_keywords_str,
         knowledge_graph_inst,
@@ -3935,7 +3946,7 @@ async def kg_query(
         context_data=context_result.context,
     )
 
-    user_query = query
+    user_query = query_for_pipeline
 
     query_image_cache_metadata = (
         image_cache_metadata(normalize_image_inputs(query_param.image_inputs))
@@ -3949,15 +3960,15 @@ async def kg_query(
 
     # Call LLM
     tokenizer: Tokenizer = global_config["tokenizer"]
-    len_of_prompts = len(tokenizer.encode(query + sys_prompt))
+    len_of_prompts = len(tokenizer.encode(query_for_pipeline + sys_prompt))
     logger.debug(
-        f"[kg_query] Sending to LLM: {len_of_prompts:,} tokens (Query: {len(tokenizer.encode(query))}, System: {len(tokenizer.encode(sys_prompt))})"
+        f"[kg_query] Sending to LLM: {len_of_prompts:,} tokens (Query: {len(tokenizer.encode(query_for_pipeline))}, System: {len(tokenizer.encode(sys_prompt))})"
     )
 
     # Handle cache
     args_hash = compute_args_hash(
         query_param.mode,
-        query,
+        query_for_pipeline,
         query_param.response_type,
         query_param.top_k,
         query_param.chunk_top_k,
@@ -4017,7 +4028,7 @@ async def kg_query(
                 CacheData(
                     args_hash=args_hash,
                     content=response,
-                    prompt=query,
+                    prompt=query_for_pipeline,
                     mode=query_param.mode,
                     cache_type="query",
                     queryparam=queryparam_dict,
@@ -5831,7 +5842,15 @@ async def naive_query(
         logger.error("Tokenizer not found in global configuration.")
         return QueryResult(content=PROMPTS["fail_response"])
 
-    chunks = await _get_vector_context(query, chunks_vdb, query_param, None)
+    query_for_pipeline = await augment_query_with_image_descriptions(
+        query,
+        query_param.image_inputs,
+        global_config["role_llm_funcs"].get("vlm"),
+        global_config.get("_resolved_summary_language", "English"),
+        max_images=len(query_param.image_inputs),
+    )
+
+    chunks = await _get_vector_context(query_for_pipeline, chunks_vdb, query_param, None)
 
     if chunks is None or len(chunks) == 0:
         logger.info(
@@ -5872,7 +5891,7 @@ async def naive_query(
 
     # Calculate available tokens for chunks
     sys_prompt_tokens = len(tokenizer.encode(pre_sys_prompt))
-    query_tokens = len(tokenizer.encode(query))
+    query_tokens = len(tokenizer.encode(query_for_pipeline))
     buffer_tokens = 200  # reserved for reference list and safety buffer
     available_chunk_tokens = max_total_tokens - (
         sys_prompt_tokens + query_tokens + buffer_tokens
@@ -5884,7 +5903,7 @@ async def naive_query(
 
     # Process chunks using unified processing with dynamic token limit
     processed_chunks = await process_chunks_unified(
-        query=query,
+        query=query_for_pipeline,
         unique_chunks=chunks,
         query_param=query_param,
         global_config=global_config,
@@ -5955,7 +5974,7 @@ async def naive_query(
         content_data=context_content,
     )
 
-    user_query = query
+    user_query = query_for_pipeline
 
     query_image_cache_metadata = (
         image_cache_metadata(normalize_image_inputs(query_param.image_inputs))
@@ -5970,7 +5989,7 @@ async def naive_query(
     # Handle cache
     args_hash = compute_args_hash(
         query_param.mode,
-        query,
+        query_for_pipeline,
         query_param.response_type,
         query_param.top_k,
         query_param.chunk_top_k,
@@ -6024,7 +6043,7 @@ async def naive_query(
                 CacheData(
                     args_hash=args_hash,
                     content=response,
-                    prompt=query,
+                    prompt=query_for_pipeline,
                     mode=query_param.mode,
                     cache_type="query",
                     queryparam=queryparam_dict,

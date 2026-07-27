@@ -2369,6 +2369,7 @@ def create_app(args):
                         "enable_llm_cache": args.enable_llm_cache,
                         "vlm_process_enable": args.vlm_process_enable,
                         "max_multimodal_case_images": args.max_multimodal_case_images,
+                        "max_query_images": args.max_query_images,
                         "workspace": default_workspace,
                         "storage_workspaces": _get_storage_workspaces(rag),
                         "max_graph_nodes": args.max_graph_nodes,

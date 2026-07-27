@@ -717,6 +717,9 @@ def parse_args() -> argparse.Namespace:
     args.max_multimodal_case_images = get_env_value(
         "MAX_MULTIMODAL_CASE_IMAGES", 10, int
     )
+    args.max_query_images = get_env_value(
+        "MAX_QUERY_IMAGES", args.max_multimodal_case_images, int
+    )
 
     # Embedding prefix configuration for context-aware embeddings. Empty prefixes
     # must be explicit via NO_PREFIX so missing config is distinguishable.
