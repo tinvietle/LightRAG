@@ -284,7 +284,12 @@ class OllamaRagasLLM(BaseRagasLLM):
 class RAGEvaluator:
     """Evaluate LightRAG retrieval quality for differential diagnosis."""
 
-    def __init__(self, test_dataset_path: str | None = None, rag_api_url: str | None = None):
+    def __init__(
+        self,
+        test_dataset_path: str | None = None,
+        rag_api_url: str | None = None,
+        include_images: bool = True,
+    ):
         if not RAGAS_AVAILABLE:
             raise ImportError(
                 "RAGAS dependencies not installed. Install with: pip install ragas datasets"
@@ -304,6 +309,7 @@ class RAGEvaluator:
         self.query_top_k = int(os.getenv("EVAL_QUERY_TOP_K", "10"))
         self.max_async = int(os.getenv("EVAL_MAX_CONCURRENT", "2"))
         self.query_mode = os.getenv("EVAL_QUERY_MODE", "hybrid")
+        self.include_images = include_images
         self.response_type = os.getenv("EVAL_RESPONSE_TYPE", "Multiple Paragraphs")
         self.user_prompt = os.getenv(
             "EVAL_DIFFERENTIAL_USER_PROMPT",
@@ -341,6 +347,10 @@ class RAGEvaluator:
 
         logger.info("Concurrency & Rate Limiting:")
         logger.info("  • Query Mode:           %s", self.query_mode)
+        logger.info(
+            "  • Query Images:         %s",
+            "enabled" if self.include_images else "disabled",
+        )
         logger.info("  • Query Top-K:          %s Entities/Relations", self.query_top_k)
         logger.info("  • LLM Max Retries:      %s", self.eval_max_retries)
         logger.info("  • LLM Timeout:          %s seconds", self.eval_timeout)
@@ -424,7 +434,7 @@ class RAGEvaluator:
                 "top_k": self.query_top_k,
                 "user_prompt": self.user_prompt,
             }
-            if image_paths:
+            if self.include_images and image_paths:
                 payload["images"] = await self._encode_image_paths(image_paths)
 
             headers = {"X-API-Key": self.api_key} if self.api_key else None
@@ -883,6 +893,7 @@ Examples:
   python lightrag/evaluation/eval_rag_context_differential_ollama.py
   python lightrag/evaluation/eval_rag_context_differential_ollama.py --dataset my_test.json
   python lightrag/evaluation/eval_rag_context_differential_ollama.py --ragendpoint http://localhost:9621
+  python lightrag/evaluation/eval_rag_context_differential_ollama.py --no-images
             """,
         )
         parser.add_argument(
@@ -905,6 +916,12 @@ Examples:
                 "(default: http://localhost:9621 or $LIGHTRAG_API_URL)"
             ),
         )
+        parser.add_argument(
+            "--no-images",
+            action="store_false",
+            dest="include_images",
+            help="Do not send dataset images to the LightRAG query API.",
+        )
         args = parser.parse_args()
 
         logger.info("%s", "=" * 70)
@@ -914,6 +931,7 @@ Examples:
         evaluator = RAGEvaluator(
             test_dataset_path=args.dataset,
             rag_api_url=args.ragendpoint,
+            include_images=args.include_images,
         )
         await evaluator.run()
     except Exception as exc:
