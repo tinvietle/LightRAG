@@ -182,6 +182,13 @@ class ReferenceItem(BaseModel):
         default=None,
         description="List of chunk contents from this file (only present when include_chunk_content=True)",
     )
+    chunks: Optional[List[Dict[str, str]]] = Field(
+        default=None,
+        description=(
+            "Detailed retrieved chunks from this file, including chunk_id, "
+            "file_path, and content (only present when include_chunk_content=True)"
+        ),
+    )
 
 
 class QueryResponse(BaseModel):
@@ -458,12 +465,20 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                 chunks = data.get("chunks", [])
                 # Create a mapping from reference_id to chunk content
                 ref_id_to_content = {}
+                ref_id_to_chunks: dict[str, list[dict[str, str]]] = {}
                 for chunk in chunks:
                     ref_id = chunk.get("reference_id", "")
                     content = chunk.get("content", "")
                     if ref_id and content:
                         # Collect chunk content; join later to avoid quadratic string concatenation
                         ref_id_to_content.setdefault(ref_id, []).append(content)
+                        ref_id_to_chunks.setdefault(ref_id, []).append(
+                            {
+                                "chunk_id": chunk.get("chunk_id", ""),
+                                "file_path": chunk.get("file_path", "unknown_source"),
+                                "content": content,
+                            }
+                        )
 
                 # Add content to references
                 enriched_references = []
@@ -473,6 +488,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                     if ref_id in ref_id_to_content:
                         # Keep content as a list of chunks (one file may have multiple chunks)
                         ref_copy["content"] = ref_id_to_content[ref_id]
+                        ref_copy["chunks"] = ref_id_to_chunks[ref_id]
                     enriched_references.append(ref_copy)
                 references = enriched_references
 
@@ -506,11 +522,19 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                 data = result.get("data", {})
                 chunks = data.get("chunks", [])
                 ref_id_to_content: dict[str, list[str]] = {}
+                ref_id_to_chunks: dict[str, list[dict[str, str]]] = {}
                 for chunk in chunks:
                     ref_id = chunk.get("reference_id", "")
                     content = chunk.get("content", "")
                     if ref_id and content:
                         ref_id_to_content.setdefault(ref_id, []).append(content)
+                        ref_id_to_chunks.setdefault(ref_id, []).append(
+                            {
+                                "chunk_id": chunk.get("chunk_id", ""),
+                                "file_path": chunk.get("file_path", "unknown_source"),
+                                "content": content,
+                            }
+                        )
 
                 enriched_references = []
                 for ref in references:
@@ -518,6 +542,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                     ref_id = ref.get("reference_id", "")
                     if ref_id in ref_id_to_content:
                         ref_copy["content"] = ref_id_to_content[ref_id]
+                        ref_copy["chunks"] = ref_id_to_chunks[ref_id]
                     enriched_references.append(ref_copy)
                 references = enriched_references
 

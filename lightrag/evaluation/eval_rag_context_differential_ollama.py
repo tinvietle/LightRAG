@@ -145,6 +145,7 @@ class EvalCaseResult:
     answer: str
     ground_truth: str
     retrieved_contexts: list[str]
+    retrieved_chunks: list[dict[str, Any]]
     missing_metrics: list[str]
     project: str
     image_count: int
@@ -161,6 +162,7 @@ class EvalCaseResult:
             "ground_truth": self.ground_truth,
             "predicted_disease": "",
             "retrieved_contexts": self.retrieved_contexts,
+            "retrieved_chunks": self.retrieved_chunks,
             "missing_metrics": self.missing_metrics,
             "project": self.project,
             "image_count": self.image_count,
@@ -450,14 +452,65 @@ class RAGEvaluator:
             references = result.get("references", [])
 
             contexts: list[str] = []
+            retrieved_chunks: list[dict[str, Any]] = []
             for reference in references:
-                content = reference.get("content", [])
-                if isinstance(content, list):
-                    contexts.extend(str(item) for item in content if item)
-                elif isinstance(content, str) and content:
-                    contexts.append(content)
+                detailed_chunks = reference.get("chunks")
+                if isinstance(detailed_chunks, list):
+                    for chunk in detailed_chunks:
+                        if not isinstance(chunk, dict) or not chunk.get("content"):
+                            continue
+                        content = str(chunk["content"])
+                        contexts.append(content)
+                        retrieved_chunks.append(
+                            {
+                                "reference_id": str(
+                                    reference.get("reference_id", "")
+                                ),
+                                "chunk_id": str(chunk.get("chunk_id", "")),
+                                "filename": str(
+                                    chunk.get(
+                                        "file_path",
+                                        reference.get("file_path", "unknown_source"),
+                                    )
+                                ),
+                                "file_path": str(
+                                    chunk.get(
+                                        "file_path",
+                                        reference.get("file_path", "unknown_source"),
+                                    )
+                                ),
+                                "content": content,
+                            }
+                        )
+                    continue
 
-            return {"answer": answer, "contexts": contexts}
+                # Backward-compatible fallback for older LightRAG servers.
+                content = reference.get("content", [])
+                content_items = content if isinstance(content, list) else [content]
+                for item in content_items:
+                    if not item:
+                        continue
+                    content_text = str(item)
+                    contexts.append(content_text)
+                    retrieved_chunks.append(
+                        {
+                            "reference_id": str(reference.get("reference_id", "")),
+                            "chunk_id": "",
+                            "filename": str(
+                                reference.get("file_path", "unknown_source")
+                            ),
+                            "file_path": str(
+                                reference.get("file_path", "unknown_source")
+                            ),
+                            "content": content_text,
+                        }
+                    )
+
+            return {
+                "answer": answer,
+                "contexts": contexts,
+                "retrieved_chunks": retrieved_chunks,
+            }
 
         except httpx.ConnectError as exc:
             raise RuntimeError(
@@ -489,6 +542,7 @@ class RAGEvaluator:
         error: str,
         answer: str = "",
         retrieved_contexts: list[str] | None = None,
+        retrieved_chunks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         result = EvalCaseResult(
             test_number=idx,
@@ -496,6 +550,7 @@ class RAGEvaluator:
             answer=answer,
             ground_truth=ground_truth,
             retrieved_contexts=retrieved_contexts or [],
+            retrieved_chunks=retrieved_chunks or [],
             missing_metrics=[],
             project=project,
             image_count=len(image_paths),
@@ -541,6 +596,7 @@ class RAGEvaluator:
 
             answer = rag_response["answer"]
             retrieved_contexts = rag_response["contexts"]
+            retrieved_chunks = rag_response["retrieved_chunks"]
             eval_dataset = Dataset.from_dict(
                 {
                     "question": [question],
@@ -588,6 +644,7 @@ class RAGEvaluator:
                         answer=answer,
                         ground_truth=ground_truth,
                         retrieved_contexts=retrieved_contexts,
+                        retrieved_chunks=retrieved_chunks,
                         missing_metrics=missing_metrics,
                         project=project,
                         image_count=len(image_paths),
@@ -606,6 +663,7 @@ class RAGEvaluator:
                         image_paths=image_paths,
                         answer=answer,
                         retrieved_contexts=retrieved_contexts,
+                        retrieved_chunks=retrieved_chunks,
                         error=str(exc),
                     )
                 finally:
@@ -676,6 +734,7 @@ class RAGEvaluator:
             "ground_truth",
             "predicted_disease",
             "retrieved_contexts",
+            "retrieved_chunks",
             "missing_metrics",
             "project",
             "image_count",
@@ -704,6 +763,9 @@ class RAGEvaluator:
                         "predicted_disease": "",
                         "retrieved_contexts": json.dumps(
                             result.get("retrieved_contexts", []), ensure_ascii=False
+                        ),
+                        "retrieved_chunks": json.dumps(
+                            result.get("retrieved_chunks", []), ensure_ascii=False
                         ),
                         "missing_metrics": json.dumps(
                             missing_metrics, ensure_ascii=False
