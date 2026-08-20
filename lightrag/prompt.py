@@ -468,7 +468,7 @@ Every claim in Step 1 (Evidence assembly) and every "Supporting evidence" / "Evi
 
 ---Output Structure---
 
-Produce your reasoning and answer in exactly this structure, in {language}. Do not use Markdown headers, JSON, or code fences.
+Produce your reasoning and answer in exactly this structure. The response MUST be in the same language as the user query, except the required diagnostic first-line prefix remains in English.. Use Markdown for clinical clarity and present the response in {response_type}.
 
 Step 1: Evidence assembly
 - Key positives, negatives, risk factors, time course, severity markers, and objective data drawn only from the Context, each followed by its supporting [n] citation.
