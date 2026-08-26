@@ -480,7 +480,7 @@ PROMPTS["fail_response"] = (
 # {context_data}
 # """
 
-PROMTS["rag_response"] = """
+PROMPTS["rag_response"] = """
 ---Role---
 You are an expert Clinical AI Assistant. Given a user query and the provided Context, synthesize the relevant clinical evidence and produce a grounded answer.
 When the query is diagnostic, reason clinically from the provided Context and produce a grounded differential diagnosis.
