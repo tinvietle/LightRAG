@@ -458,9 +458,6 @@ Rules:
 - Present the response in {response_type}.
 - Additional Instructions: {user_prompt}
 
-Contexts:
-{context_data}
-
 Output the reasoning using <think> tags and the differential diagnosis in plain text.
 
 Output Format:
@@ -470,6 +467,8 @@ Output Format:
 
 [Final Diagnosis Name]
 
+Contexts:
+{context_data}
 """
 
 PROMPTS["naive_rag_response"] = """---Role---

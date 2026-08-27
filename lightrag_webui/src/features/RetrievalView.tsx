@@ -105,7 +105,9 @@ const detectLatexCompleteness = (content: string): boolean => {
   return !hasUnclosedBlock && !hasUnclosedInline
 }
 
-// Robust COT parsing function to handle multiple think blocks and edge cases
+/*
+// Robust COT parsing function to handle multiple think blocks and edge cases.
+// Retained for restoring the thinking-panel behaviour later.
 const parseCOTContent = (content: string) => {
   const thinkStartTag = '<think>'
   const thinkEndTag = '</think>'
@@ -164,6 +166,7 @@ const parseCOTContent = (content: string) => {
     hasValidThinkBlock: hasThinkStart && hasThinkEnd && startMatches.length === endMatches.length
   }
 }
+*/
 
 export default function RetrievalView() {
   const { t } = useTranslation()
@@ -415,34 +418,40 @@ export default function RetrievalView() {
       const updateAssistantMessage = (chunk: string, isError?: boolean) => {
         assistantMessage.content += chunk
 
-        // Start thinking timer on first sight of think tag
-        if (assistantMessage.content.includes('<think>') && !thinkingStartTime.current) {
-          thinkingStartTime.current = Date.now()
-        }
-
-        // Use the new robust COT parsing function
-        const cotResult = parseCOTContent(assistantMessage.content)
-
-        // Update thinking state
-        assistantMessage.isThinking = cotResult.isThinking
-
-        // Only calculate time and extract thinking content once when thinking is complete
-        if (cotResult.hasValidThinkBlock && !thinkingProcessed.current) {
-          if (thinkingStartTime.current && !assistantMessage.thinkingTime) {
-            const duration = (Date.now() - thinkingStartTime.current) / 1000
-            assistantMessage.thinkingTime = parseFloat(duration.toFixed(2))
-          }
-          thinkingProcessed.current = true
-        }
-
-        // Update content based on parsing results
-        assistantMessage.thinkingContent = cotResult.thinkingContent
-        // Only fallback to full content if not in a thinking state.
-        if (cotResult.isThinking) {
-          assistantMessage.displayContent = ''
-        } else {
-          assistantMessage.displayContent = cotResult.displayContent || assistantMessage.content
-        }
+        // Thinking/COT parsing is temporarily disabled so prompt-only and
+        // context-only responses render exactly as returned by the backend.
+        //
+        // // Start thinking timer on first sight of think tag
+        // if (assistantMessage.content.includes('<think>') && !thinkingStartTime.current) {
+        //   thinkingStartTime.current = Date.now()
+        // }
+        //
+        // // Use the new robust COT parsing function
+        // const cotResult = parseCOTContent(assistantMessage.content)
+        //
+        // // Update thinking state
+        // assistantMessage.isThinking = cotResult.isThinking
+        //
+        // // Only calculate time and extract thinking content once when thinking is complete
+        // if (cotResult.hasValidThinkBlock && !thinkingProcessed.current) {
+        //   if (thinkingStartTime.current && !assistantMessage.thinkingTime) {
+        //     const duration = (Date.now() - thinkingStartTime.current) / 1000
+        //     assistantMessage.thinkingTime = parseFloat(duration.toFixed(2))
+        //   }
+        //   thinkingProcessed.current = true
+        // }
+        //
+        // // Update content based on parsing results
+        // assistantMessage.thinkingContent = cotResult.thinkingContent
+        // // Only fallback to full content if not in a thinking state.
+        // if (cotResult.isThinking) {
+        //   assistantMessage.displayContent = ''
+        // } else {
+        //   assistantMessage.displayContent = cotResult.displayContent || assistantMessage.content
+        // }
+        assistantMessage.isThinking = false
+        assistantMessage.thinkingContent = undefined
+        assistantMessage.displayContent = assistantMessage.content
 
         // Detect if the assistant message contains a complete mermaid code block
         // Simple heuristic: look for ```mermaid ... ```
@@ -560,22 +569,24 @@ export default function RetrievalView() {
 
           // Enhanced cleanup with error handling to prevent memory leaks
           try {
-            // Final COT state validation and cleanup
-            const finalCotResult = parseCOTContent(assistantMessage.content)
+            // Final COT parsing is disabled: preserve the raw backend response.
+            // const finalCotResult = parseCOTContent(assistantMessage.content)
 
             // Force set final state - stream ended so thinking must be false
             assistantMessage.isThinking = false
+            assistantMessage.thinkingContent = undefined
+            assistantMessage.displayContent = assistantMessage.content
 
             // If we have a complete thinking block but time wasn't calculated, do final calculation
-            if (finalCotResult.hasValidThinkBlock && thinkingStartTime.current && !assistantMessage.thinkingTime) {
-              const duration = (Date.now() - thinkingStartTime.current) / 1000
-              assistantMessage.thinkingTime = parseFloat(duration.toFixed(2))
-            }
-
-            // Ensure display content is correctly set based on final parsing
-            if (finalCotResult.displayContent !== undefined) {
-              assistantMessage.displayContent = finalCotResult.displayContent
-            }
+            // if (finalCotResult.hasValidThinkBlock && thinkingStartTime.current && !assistantMessage.thinkingTime) {
+            //   const duration = (Date.now() - thinkingStartTime.current) / 1000
+            //   assistantMessage.thinkingTime = parseFloat(duration.toFixed(2))
+            // }
+            //
+            // // Ensure display content is correctly set based on final parsing
+            // if (finalCotResult.displayContent !== undefined) {
+            //   assistantMessage.displayContent = finalCotResult.displayContent
+            // }
 
           } catch (error) {
             console.error('Error in final COT state validation:', error)
