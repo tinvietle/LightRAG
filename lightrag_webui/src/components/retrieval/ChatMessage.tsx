@@ -85,6 +85,13 @@ export const ChatMessage = ({
     ? message.content
     : (displayContent !== undefined ? displayContent : (message.content || ''))
 
+  // `rehypeRaw` below interprets literal think tags as HTML elements, which
+  // makes the tag characters disappear in the rendered chat message. Wrap
+  // only these tags in Markdown code spans so they render as literal text.
+  const renderableDisplayContent = finalDisplayContent
+    .replace(/<think>/g, '`<think>`')
+    .replace(/<\/think>/g, '`</think>`')
+
   // Load KaTeX rehype plugin dynamically
   // Note: KaTeX extensions (mhchem, copy-tex) are imported statically in main.tsx
   useEffect(() => {
@@ -264,7 +271,7 @@ export const ChatMessage = ({
               skipHtml={false}
               components={mainMarkdownComponents}
             >
-              {finalDisplayContent}
+              {renderableDisplayContent}
             </ReactMarkdown>
           </div>
         </div>
