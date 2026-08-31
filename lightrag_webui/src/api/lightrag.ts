@@ -192,6 +192,8 @@ export type QueryRequest = {
   only_need_context?: boolean
   /** If True, only returns the generated prompt without producing a response. */
   only_need_prompt?: boolean
+  /** If True, KG-RAG sends retrieved context in the final user message instead of the system message. */
+  context_in_user_message?: boolean
   /** Defines the response format. Examples: 'Multiple Paragraphs', 'Single Paragraph', 'Bullet Points'. */
   response_type?: string
   /** If True, enables streaming output for real-time responses. */

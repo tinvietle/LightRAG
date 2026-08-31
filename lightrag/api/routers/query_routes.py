@@ -40,6 +40,14 @@ class QueryRequest(BaseModel):
         description="If True, only returns the generated prompt without producing a response.",
     )
 
+    context_in_user_message: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If True, KG-RAG sends retrieved context in the final user message "
+            "instead of the system message."
+        ),
+    )
+
     response_type: Optional[str] = Field(
         min_length=1,
         default=None,

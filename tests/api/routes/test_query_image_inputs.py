@@ -37,6 +37,15 @@ def test_query_request_forwards_valid_images_to_query_param() -> None:
     assert query_param.image_inputs == [VALID_PNG_DATA_URL]
 
 
+def test_query_request_forwards_context_message_layout_setting() -> None:
+    _, QueryRequest = _query_request_model()
+    request = QueryRequest(query="Describe the case", context_in_user_message=True)
+
+    query_param = request.to_query_params(is_stream=False)
+
+    assert query_param.context_in_user_message is True
+
+
 def test_query_request_rejects_invalid_image_base64() -> None:
     _, QueryRequest = _query_request_model()
     with pytest.raises(ValidationError, match="Invalid query image"):

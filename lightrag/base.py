@@ -98,6 +98,9 @@ class QueryParam:
     only_need_prompt: bool = False
     """If True, only returns the generated prompt without producing a response."""
 
+    context_in_user_message: bool = True
+    """If True, KG-RAG sends retrieved context in the final user message instead of the system message."""
+
     response_type: str = "Multiple Paragraphs"
     """Defines the response format. Examples: 'Multiple Paragraphs', 'Single Paragraph', 'Bullet Points'."""
 

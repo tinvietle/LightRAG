@@ -76,6 +76,11 @@ export default function QuerySettings() {
   // Warn only for the narrower-coverage modes (hybrid/naive/local/global).
   const showQualityWarning =
     querySettings.mode !== 'mix' && querySettings.mode !== 'bypass'
+  const supportsContextInUserMessage =
+    querySettings.mode === 'local' ||
+    querySettings.mode === 'global' ||
+    querySettings.mode === 'hybrid' ||
+    querySettings.mode === 'mix'
 
   return (
     <Card className="flex shrink-0 flex-col w-[280px]">
@@ -386,6 +391,34 @@ export default function QuerySettings() {
                   id="enable_rerank"
                   checked={querySettings.enable_rerank}
                   onCheckedChange={(checked) => handleChange('enable_rerank', checked)}
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <label
+                        htmlFor="context_in_user_message"
+                        className={cn(
+                          'flex-1 ml-1 cursor-help',
+                          !supportsContextInUserMessage && 'cursor-not-allowed opacity-50'
+                        )}
+                      >
+                        {t('retrievePanel.querySettings.contextInUserMessage')}
+                      </label>
+                    </TooltipTrigger>
+                    <TooltipContent side="left">
+                      <p>{t('retrievePanel.querySettings.contextInUserMessageTooltip')}</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                <Checkbox
+                  className="mr-10 cursor-pointer"
+                  id="context_in_user_message"
+                  checked={querySettings.context_in_user_message ?? true}
+                  disabled={!supportsContextInUserMessage}
+                  onCheckedChange={(checked) => handleChange('context_in_user_message', checked)}
                 />
               </div>
 

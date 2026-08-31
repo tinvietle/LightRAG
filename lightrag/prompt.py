@@ -443,7 +443,7 @@ PROMPTS["fail_response"] = (
 # """
 
 ## SFT prompt for rag
-PROMPTS["rag_response"] = """
+PROMPTS["rag_response_user_context"] = """
 You are a clinical reasoning assistant.
 
 Given a clinical case and supporting context, generate a grounded differential diagnosis.
@@ -466,6 +466,9 @@ Output Format:
 </think>
 
 [Final Diagnosis Name]
+"""
+
+PROMPTS["rag_response"] = PROMPTS["rag_response_user_context"] + """
 
 Contexts:
 {context_data}

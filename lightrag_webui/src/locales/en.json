@@ -463,6 +463,8 @@
       "onlyNeedContextTooltip": "If True, only returns the retrieved context without generating a response",
       "onlyNeedPrompt": "Only Need Prompt",
       "onlyNeedPromptTooltip": "If True, only returns the generated prompt without producing a response",
+      "contextInUserMessage": "Context in User Message",
+      "contextInUserMessageTooltip": "For KG-RAG modes, send retrieved context with the final user query instead of the system prompt. Turn off to restore the default layout.",
       "streamResponse": "Stream Response",
       "streamResponseTooltip": "If True, enables streaming output for real-time responses",
       "userPrompt": "Additional Output Prompt",

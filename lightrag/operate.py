@@ -3938,15 +3938,32 @@ async def kg_query(
         else "Multiple Paragraphs"
     )
 
-    # Build system prompt
-    sys_prompt_temp = system_prompt if system_prompt else PROMPTS["rag_response"]
+    # Keep the legacy template as the default. The opt-in layout keeps
+    # instructions in the system message and puts untrusted retrieved content
+    # next to the user's question in the final user message.
+    context_in_user_message = query_param.context_in_user_message
+    sys_prompt_temp = system_prompt or (
+        PROMPTS["rag_response_user_context"]
+        if context_in_user_message
+        else PROMPTS["rag_response"]
+    )
     sys_prompt = sys_prompt_temp.format(
         response_type=response_type,
         user_prompt=user_prompt,
-        context_data=context_result.context,
+        context_data="" if context_in_user_message else context_result.context,
     )
 
-    user_query = query_for_pipeline
+    if context_in_user_message:
+        user_query = "\n\n".join(
+            [
+                "---Retrieved Context---",
+                context_result.context,
+                "---User Query---",
+                query_for_pipeline,
+            ]
+        )
+    else:
+        user_query = query_for_pipeline
 
     query_image_cache_metadata = (
         image_cache_metadata(normalize_image_inputs(query_param.image_inputs))
@@ -3955,14 +3972,16 @@ async def kg_query(
     )
 
     if query_param.only_need_prompt:
-        prompt_content = "\n\n".join([sys_prompt, "---User Query---", user_query])
+        prompt_content = "\n\n".join(
+            ["---System Prompt---", sys_prompt, "---User Prompt---", user_query]
+        )
         return QueryResult(content=prompt_content, raw_data=context_result.raw_data)
 
     # Call LLM
     tokenizer: Tokenizer = global_config["tokenizer"]
-    len_of_prompts = len(tokenizer.encode(query_for_pipeline + sys_prompt))
+    len_of_prompts = len(tokenizer.encode(user_query + sys_prompt))
     logger.debug(
-        f"[kg_query] Sending to LLM: {len_of_prompts:,} tokens (Query: {len(tokenizer.encode(query_for_pipeline))}, System: {len(tokenizer.encode(sys_prompt))})"
+        f"[kg_query] Sending to LLM: {len_of_prompts:,} tokens (User: {len(tokenizer.encode(user_query))}, System: {len(tokenizer.encode(sys_prompt))})"
     )
 
     # Handle cache
@@ -3978,6 +3997,7 @@ async def kg_query(
         hl_keywords_str,
         ll_keywords_str,
         query_param.user_prompt or "",
+        query_param.context_in_user_message,
         query_param.enable_rerank,
         global_config.get("enable_content_headings", False),
         query_image_cache_metadata,
@@ -4017,6 +4037,7 @@ async def kg_query(
                 "hl_keywords": hl_keywords_str,
                 "ll_keywords": ll_keywords_str,
                 "user_prompt": query_param.user_prompt or "",
+                "context_in_user_message": query_param.context_in_user_message,
                 "enable_rerank": query_param.enable_rerank,
                 "enable_content_headings": global_config.get(
                     "enable_content_headings", False
@@ -4934,9 +4955,12 @@ async def _build_context_str(
         global_config.get("max_total_tokens", DEFAULT_MAX_TOTAL_TOKENS),
     )
 
-    # Get the system prompt template from PROMPTS or global_config
-    sys_prompt_template = global_config.get(
-        "system_prompt_template", PROMPTS["rag_response"]
+    # Match the system-template overhead to the selected KG-RAG message
+    # layout. The retrieved-context token budget is counted separately below.
+    sys_prompt_template = (
+        PROMPTS["rag_response_user_context"]
+        if query_param.context_in_user_message
+        else global_config.get("system_prompt_template", PROMPTS["rag_response"])
     )
 
     kg_context_template = PROMPTS["kg_query_context"]
@@ -4973,13 +4997,22 @@ async def _build_context_str(
 
     # Calculate available tokens for text chunks
     query_tokens = len(tokenizer.encode(query))
+    user_message_wrapper_tokens = (
+        len(tokenizer.encode("---Retrieved Context---\n\n---User Query---\n"))
+        if query_param.context_in_user_message
+        else 0
+    )
     buffer_tokens = 200  # reserved for reference list and safety buffer
     available_chunk_tokens = max_total_tokens - (
-        sys_prompt_tokens + kg_context_tokens + query_tokens + buffer_tokens
+        sys_prompt_tokens
+        + kg_context_tokens
+        + query_tokens
+        + user_message_wrapper_tokens
+        + buffer_tokens
     )
 
     logger.debug(
-        f"Token allocation - Total: {max_total_tokens}, SysPrompt: {sys_prompt_tokens}, Query: {query_tokens}, KG: {kg_context_tokens}, Buffer: {buffer_tokens}, Available for chunks: {available_chunk_tokens}"
+        f"Token allocation - Total: {max_total_tokens}, SysPrompt: {sys_prompt_tokens}, Query: {query_tokens}, KG: {kg_context_tokens}, UserWrapper: {user_message_wrapper_tokens}, Buffer: {buffer_tokens}, Available for chunks: {available_chunk_tokens}"
     )
 
     # Apply token truncation to chunks using the dynamic limit

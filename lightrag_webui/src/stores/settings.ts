@@ -126,6 +126,7 @@ const useSettingsStoreBase = create<SettingsState>()(
         max_total_tokens: 30000,
         only_need_context: false,
         only_need_prompt: false,
+        context_in_user_message: true,
         stream: true,
         history_turns: 0,
         user_prompt: '',
