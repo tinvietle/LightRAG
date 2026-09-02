@@ -308,7 +308,8 @@ class RAGEvaluator:
         self.eval_timeout = int(os.getenv("EVAL_LLM_TIMEOUT", "180"))
         self.eval_think = _parse_ollama_think(os.getenv("EVAL_OLLAMA_THINK"))
         self.eval_max_retries = int(os.getenv("EVAL_LLM_MAX_RETRIES", "5"))
-        self.query_top_k = int(os.getenv("EVAL_QUERY_TOP_K", "10"))
+        self.query_top_k = int(os.getenv("EVAL_QUERY_TOP_K", "40"))
+        self.chunk_top_k = int(os.getenv("EVAL_CHUNK_TOP_K", "20"))
         self.max_async = int(os.getenv("EVAL_MAX_CONCURRENT", "2"))
         self.query_mode = os.getenv("EVAL_QUERY_MODE", "hybrid")
         self.include_images = include_images
@@ -354,6 +355,7 @@ class RAGEvaluator:
             "enabled" if self.include_images else "disabled",
         )
         logger.info("  • Query Top-K:          %s Entities/Relations", self.query_top_k)
+        logger.info("  • Chunk Top-K:          %s Chunks", self.chunk_top_k)
         logger.info("  • LLM Max Retries:      %s", self.eval_max_retries)
         logger.info("  • LLM Timeout:          %s seconds", self.eval_timeout)
         logger.info("  • Eval Concurrency:     %s", self.max_async)
@@ -434,6 +436,7 @@ class RAGEvaluator:
                 "include_chunk_content": True,
                 "response_type": self.response_type,
                 "top_k": self.query_top_k,
+                "chunk_top_k": self.chunk_top_k,
                 "user_prompt": self.user_prompt,
             }
             if self.include_images and image_paths:
