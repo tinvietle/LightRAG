@@ -34,13 +34,56 @@ load_dotenv(dotenv_path=".env", override=False)
 
 MAX_QUERY_IMAGES = 10
 DEFAULT_RESULTS_BASENAME = "results"
-DIFFERENTIAL_GUIDELINE = """When diagnosis is being considered, answer in terms of a differential diagnosis.
-- List the most plausible supported diagnoses or syndromes.
-- Explain the evidence supporting each possibility.
-- Note evidence against each possibility when present.
-- Identify missing data needed to discriminate between them.
-- If one diagnosis is more strongly supported, describe it as the leading or most supported possibility, not as a certain conclusion, unless it is explicitly confirmed.
-- Keep directly supported facts separate from conflicting evidence and missing information."""
+BYPASS_INSTRUCTION_TEMPLATE = """---Role---
+
+You are an expert Clinical AI Assistant specializing in clinical reasoning from the clinical case information provided by the user. When the query is diagnostic, construct a clinically grounded differential diagnosis rather than declare a single "correct" diagnosis.
+
+---Goal---
+
+Generate a comprehensive, well-structured clinical answer based on the clinical details in the user query. When diagnosis is being considered, compare the most plausible possibilities, explain uncertainty, and distinguish what is supported, missing, and unconfirmed.
+
+> **Important Disclaimer:** This system is intended to support clinical decision-making and medical education. All clinical information provided must be validated by a licensed healthcare professional before application to patient care. This system does not replace clinical judgment.
+
+---Instructions---
+
+1. Query Understanding
+  - Determine the clinician's or learner's information need from the user query. Answer only that question.
+  - If the query asks for diagnosis, causes, interpretation of a presentation, or likely explanation of findings, answer in terms of a differential diagnosis.
+  - Do not present a single definitive diagnosis unless the user query explicitly documents a confirmed diagnosis.
+
+2. Evidence Handling
+  - Treat clinical details in the user query and supplied images as case evidence. Clearly distinguish directly documented facts from clinical inferences.
+  - Use your medical knowledge to interpret the case, but do not invent case-specific facts, test results, treatments, or outcomes.
+
+3. Conflicting or Weak Evidence
+  - Do not merge conflicting case details into an unsupported claim. State the conflict briefly, present supported alternatives, and identify missing discriminating information.
+  - If the clinical details are weak, incomplete, ambiguous, or suspicious, say so explicitly.
+
+4. Grounded Response Construction
+  - For diagnostic questions:
+    - First output exactly one opening sentence in this format: `Top 5 possible diseases are: 1. Disease A; 2. Disease B; 3. Disease C; 4. Disease D; 5. Disease E`.
+    - Keep the prefix `Top 5 possible diseases are:` exactly in English.
+    - Rank exactly five disease or syndrome candidates from strongest to weakest support, with no explanations or citations in the opening sentence.
+    - Explain only those same five candidates. For each, provide supporting evidence, evidence against when present, and missing discriminating data.
+    - If supported, identify urgent or high-risk alternatives that should not be overlooked.
+  - Describe a more-supported diagnosis as leading or most supported, not certain, unless explicitly confirmed in the user query.
+  - Separate directly supported facts, conflicting evidence, and missing information.
+
+5. References
+  - Do not fabricate references or citations. In the final references section, write exactly: `* No retrieved references (bypass mode).`
+
+6. Formatting & Language
+  - The response MUST be in the same language as the user query, except the required diagnostic first-line prefix remains in English.
+  - Use Markdown for clinical clarity and present the response in {response_type}.
+  - For diagnostic queries, follow the opening sentence with concise sections such as `### Differential Diagnosis`, `### Key Supporting Evidence`, `### Missing or Conflicting Information`, and `### References`.
+
+7. References Section Format
+  - Use heading: `### References`.
+  - Do not generate anything after the references section.
+
+---User Query---
+{question}
+"""
 
 DISEASE_TAG_PATTERN = re.compile(
     r"<disease_name>\s*(.*?)\s*</disease_name>", re.IGNORECASE | re.DOTALL
@@ -95,6 +138,14 @@ def _format_retrieved_context(contexts: list[str]) -> str:
     )
 
 
+def _build_bypass_query(question: str, response_type: str) -> str:
+    """Apply the evaluator-only, context-free counterpart of the RAG prompt."""
+    return BYPASS_INSTRUCTION_TEMPLATE.format(
+        response_type=response_type,
+        question=question,
+    )
+
+
 class BypassEvaluator:
     """Evaluate LightRAG bypass responses for a JSON benchmark dataset."""
 
@@ -102,6 +153,7 @@ class BypassEvaluator:
         self,
         test_dataset_path: str | None = None,
         rag_api_url: str | None = None,
+        include_images: bool = True,
     ) -> None:
         if test_dataset_path is None:
             test_dataset_path = str(Path(__file__).parent / "sample_dataset.json")
@@ -122,6 +174,7 @@ class BypassEvaluator:
         self.request_timeout = int(timeout_value)
         self.max_async = int(os.getenv("EVAL_MAX_CONCURRENT", "2"))
         self.response_type = os.getenv("EVAL_RESPONSE_TYPE", "Multiple Paragraphs")
+        self.include_images = include_images
         self.api_key = os.getenv("LIGHTRAG_API_KEY")
 
         self.test_cases = self._load_test_dataset()
@@ -135,6 +188,10 @@ class BypassEvaluator:
         logger.info("  • Total Test Cases:    %s", len(self.test_cases))
         logger.info("  • Max Concurrent:      %s", self.max_async)
         logger.info("  • Request Timeout:     %s seconds", self.request_timeout)
+        logger.info(
+            "  • Query Images:        %s",
+            "enabled" if self.include_images else "disabled",
+        )
         logger.info("  • Results Directory:   %s", self.results_dir.name)
 
     def _resolve_existing_path(self, raw_path: Path | str) -> Path:
@@ -231,14 +288,6 @@ class BypassEvaluator:
                 "include_references": True,
                 "include_chunk_content": True,
                 "response_type": self.response_type,
-                "user_prompt": (
-                    "Answer in this exact format when the question is about a disease:\n"
-                    "<disease_name>DISEASE NAME</disease_name>\n"
-                    "<explanation>FULL EXPLANATION</explanation>\n"
-                    "Put the disease name on the first line, inside the <disease_name> tag, "
-                    "with no text before it. The disease name must be concise and contain only "
-                    "the diagnosis name. Then provide the full explanation below."
-                ),
             }
             if image_paths:
                 payload["images"] = await self._encode_image_paths(image_paths)
@@ -309,7 +358,7 @@ class BypassEvaluator:
                 question = str(test_case.get("question", "")).strip()
                 if not question:
                     raise ValueError(f"Test case {idx} is missing a question")
-                question = f"{DIFFERENTIAL_GUIDELINE}\n==========\n{question}"
+                question = _build_bypass_query(question, self.response_type)
 
                 ground_truth = str(test_case.get("ground_truth", ""))
                 image_paths = self._extract_image_paths(test_case)
@@ -322,7 +371,7 @@ class BypassEvaluator:
                 bypass_response = await self.generate_bypass_response(
                     question=question,
                     client=client,
-                    image_paths=image_paths,
+                    image_paths=image_paths if self.include_images else [],
                 )
             except Exception as exc:
                 logger.error("Error generating response for test %s: %s", idx, exc)
@@ -561,6 +610,7 @@ Examples:
   python lightrag/evaluation/eval_bypass_ollama.py
   python lightrag/evaluation/eval_bypass_ollama.py --dataset sample_dataset.json
   python lightrag/evaluation/eval_bypass_ollama.py --ragendpoint http://localhost:9621
+  python lightrag/evaluation/eval_bypass_ollama.py --no-images
             """,
         )
         parser.add_argument(
@@ -583,6 +633,12 @@ Examples:
                 "(default: http://localhost:9621 or $LIGHTRAG_API_URL)"
             ),
         )
+        parser.add_argument(
+            "--no-images",
+            action="store_false",
+            dest="include_images",
+            help="Do not send dataset images to the LightRAG query API.",
+        )
         args = parser.parse_args()
 
         logger.info("%s", "=" * 70)
@@ -592,6 +648,7 @@ Examples:
         evaluator = BypassEvaluator(
             test_dataset_path=args.dataset,
             rag_api_url=args.ragendpoint,
+            include_images=args.include_images,
         )
         await evaluator.run()
     except Exception as exc:
