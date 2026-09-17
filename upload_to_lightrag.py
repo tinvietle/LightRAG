@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import mimetypes
 import os
 from pathlib import Path
+import time
 
 import httpx
-import argparse
 
 
 # dataset_path = Path(__file__).resolve().parent / "../dataset/fold1/train"
@@ -149,7 +150,8 @@ def main(root: Path, use_without_images: bool) -> None:
         uploaded = 0
         skipped = 0
 
-        for json_path, image_paths in iter_cases(root):
+        cases = list(iter_cases(root))
+        for case_index, (json_path, image_paths) in enumerate(cases):
             if not image_paths:
                 print(f"WARN {json_path} -> no linked image files found")
 
@@ -166,6 +168,10 @@ def main(root: Path, use_without_images: bool) -> None:
             except Exception as exc:
                 skipped += 1
                 print(f"ERR  {json_path} -> {exc}")
+
+            # Give the server five seconds before submitting the next case.
+            if case_index < len(cases) - 1:
+                time.sleep(10)
 
         print(f"Done. uploaded={uploaded} failed={skipped}")
 
