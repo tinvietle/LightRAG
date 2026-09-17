@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import mimetypes
 import os
 from pathlib import Path
 import time
@@ -13,26 +12,7 @@ import httpx
 base_url = os.getenv("LIGHTRAG_API_BASE_URL", "http://127.0.0.1:9621")
 api_key = os.getenv("LIGHTRAG_API_KEY")
 max_images = int(os.getenv("MAX_MULTIMODAL_CASE_IMAGES", "10"))
-image_content_types = {
-    ".webp": "image/webp",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".bmp": "image/bmp",
-    ".tif": "image/tiff",
-    ".tiff": "image/tiff",
-}
-supported_image_suffixes = {
-    ".webp",
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".bmp",
-    ".tif",
-    ".tiff",
-}
+supported_image_suffixes = {".png"}
 
 
 def iter_cases(root: Path):
@@ -61,12 +41,7 @@ def upload_case(client: httpx.Client, json_path: Path, image_paths: list[Path]) 
                 break
             image_file = image_path.open("rb")
             open_files.append(image_file)
-            mime_type = image_content_types.get(image_path.suffix.lower())
-            if mime_type is None:
-                mime_type, _ = mimetypes.guess_type(image_path.name)
-            files.append(
-                ("images", (image_path.name, image_file, mime_type or "application/octet-stream"))
-            )
+            files.append(("images", (image_path.name, image_file, "image/png")))
             image_count += 1
 
         response = client.post("/documents/upload_multimodal_case", files=files)
