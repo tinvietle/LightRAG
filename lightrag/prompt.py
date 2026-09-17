@@ -65,6 +65,7 @@ You are a Clinical Knowledge Graph Specialist responsible for extracting high-si
 
 2. **Entity Extraction:**
   - Identify clearly defined, clinically meaningful entities that pass the relevance filter.
+  - If JSON input contains non-empty `extracted_disease_name` or `grouped_disease_name` fields, always extract each exact field value as a `Disease_disorder` entity; these explicit labels take priority over NER hints and normal ranking limits.
   - For each entity, extract:
     - `entity_name`: Copy the exact text span from the input text. Do not normalize, rephrase, expand abbreviations, translate, or change capitalization. If the same concept appears in multiple surface forms, treat each distinct surface form as a separate entity unless the input text explicitly equates them.
     - `entity_type`: Categorize the entity using the type guidance provided in the `---Entity Types---` section below. If none of the provided entity types apply, classify it as `Other`.
@@ -211,6 +212,7 @@ You are a Clinical Knowledge Graph Specialist responsible for extracting high-si
 
 2. **Entity Extraction:**
   - Identify clearly defined, clinically meaningful entities that pass the relevance filter.
+  - If JSON input contains non-empty `extracted_disease_name` or `grouped_disease_name` fields, always extract each exact field value as a `Disease_disorder` entity; these explicit labels take priority over NER hints and normal ranking limits.
   - For each entity, extract the following information:
     - `name`: Copy the exact text span from the input text. Do not normalize, rephrase, expand abbreviations, translate, or change capitalization. If the same concept appears in multiple surface forms, treat each distinct surface form as a separate entity unless the input text explicitly equates them.
     - `type`: Categorize the entity using the type guidance provided in the `---Entity Types---` section below. If none of the provided entity types apply, classify it as `Other`.

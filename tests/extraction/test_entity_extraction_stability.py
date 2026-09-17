@@ -327,6 +327,21 @@ def test_entity_extraction_system_prompts_label_examples_as_format_templates():
 
 
 @pytest.mark.offline
+def test_entity_extraction_prompts_prioritize_explicit_disease_fields():
+    from lightrag.prompt import PROMPTS
+
+    for prompt_key in (
+        "entity_extraction_system_prompt",
+        "entity_extraction_json_system_prompt",
+    ):
+        prompt = PROMPTS[prompt_key]
+        assert "`extracted_disease_name`" in prompt
+        assert "`grouped_disease_name`" in prompt
+        assert "always extract each exact field value" in prompt
+        assert "`Disease_disorder`" in prompt
+
+
+@pytest.mark.offline
 def test_text_examples_render_tuple_and_completion_delimiters():
     from lightrag.prompt import PROMPTS
 
