@@ -55,6 +55,10 @@ def _make_global_config(
         "llm_model_max_async": 1,
         "entity_extraction_use_json": use_json,
         "enable_gliner_ner": enable_gliner_ner,
+        "gliner_ner_threshold": 0.9,
+        "gliner_ner_flat": True,
+        "gliner_ner_max_entities": 50,
+        "gliner_ner_max_tokens": 400,
         "_entity_extraction_prompt_profile": prompt_profile,
     }
 
@@ -655,6 +659,13 @@ async def test_text_mode_gliner_block_injected_into_initial_and_continue_prompts
         )
 
     assert recognize_mock.await_count == 1
+    assert recognize_mock.await_args.kwargs == {
+        "threshold": 0.9,
+        "flat_ner": True,
+        "max_entities": 50,
+        "max_tokens": 400,
+        "tokenizer": global_config["tokenizer"],
+    }
     initial_prompt = llm_func.call_args_list[0][0][0]
     continue_prompt = llm_func.call_args_list[1][0][0]
     expected_block = (

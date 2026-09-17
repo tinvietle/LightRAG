@@ -369,6 +369,26 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
     )
     """Run optional GLiNER pre-recognition before LLM entity extraction."""
 
+    gliner_ner_threshold: float = field(
+        default_factory=lambda: get_env_value("GLINER_NER_THRESHOLD", 0.9, float)
+    )
+    """Minimum confidence score for GLiNER pre-recognition."""
+
+    gliner_ner_flat: bool = field(
+        default_factory=lambda: get_env_value("GLINER_NER_FLAT", True, bool)
+    )
+    """Disallow overlapping GLiNER spans while retaining variable-length spans."""
+
+    gliner_ner_max_entities: int = field(
+        default_factory=lambda: get_env_value("GLINER_NER_MAX_ENTITIES", 50, int)
+    )
+    """Maximum number of unique GLiNER hints added to an extraction prompt."""
+
+    gliner_ner_max_tokens: int = field(
+        default_factory=lambda: get_env_value("GLINER_NER_MAX_TOKENS", 400, int)
+    )
+    """Maximum token budget for GLiNER hints in an extraction prompt."""
+
     force_llm_summary_on_merge: int = field(
         default=get_env_value(
             "FORCE_LLM_SUMMARY_ON_MERGE", DEFAULT_FORCE_LLM_SUMMARY_ON_MERGE, int

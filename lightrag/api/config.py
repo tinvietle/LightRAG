@@ -551,6 +551,12 @@ def parse_args() -> argparse.Namespace:
     )
     args.enable_llm_cache = get_env_value("ENABLE_LLM_CACHE", True, bool)
     args.enable_gliner_ner = get_env_value("ENABLE_GLINER_NER", True, bool)
+    args.gliner_ner_threshold = get_env_value("GLINER_NER_THRESHOLD", 0.9, float)
+    args.gliner_ner_flat = get_env_value("GLINER_NER_FLAT", True, bool)
+    args.gliner_ner_max_entities = get_env_value(
+        "GLINER_NER_MAX_ENTITIES", 50, int
+    )
+    args.gliner_ner_max_tokens = get_env_value("GLINER_NER_MAX_TOKENS", 400, int)
 
     # --- Per-role LLM configuration (driven by lightrag.ROLES registry) ---
     for spec in ROLES:

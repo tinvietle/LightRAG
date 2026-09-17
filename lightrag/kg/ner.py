@@ -4,7 +4,7 @@ import asyncio
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from lightrag.utils import logger
 
@@ -15,6 +15,10 @@ NER_MODEL_NAME = "Ihor/gliner-biomed-base-v1.0"
 _ner_model_cache: Any | None = None
 
 _ENTITY_TYPE_LINE_RE = re.compile(r"^\s*[-*]\s*`?([^:`]+?)`?\s*:")
+
+
+class _Tokenizer(Protocol):
+    def encode(self, content: str) -> list[int]: ...
 
 
 def extract_entity_labels_from_guidance(entity_types_guidance: str) -> list[str]:
@@ -39,6 +43,8 @@ def _normalize_gliner_result(raw_entities: list[object]) -> list[dict[str, Any]]
                     "text": item.get("text", ""),
                     "label": item.get("label"),
                     "score": item.get("score"),
+                    "start": item.get("start"),
+                    "end": item.get("end"),
                 }
             )
             continue
@@ -48,9 +54,54 @@ def _normalize_gliner_result(raw_entities: list[object]) -> list[dict[str, Any]]
                 "text": getattr(item, "text", ""),
                 "label": getattr(item, "label", None),
                 "score": getattr(item, "score", None),
+                "start": getattr(item, "start", None),
+                "end": getattr(item, "end", None),
             }
         )
     return normalized
+
+
+def _entity_text_key(entity: dict[str, Any]) -> str:
+    """Return a case-insensitive key with insignificant whitespace collapsed."""
+    return " ".join(str(entity.get("text", "")).split()).casefold()
+
+
+def _select_ner_entities(
+    entities: list[dict[str, Any]],
+    *,
+    max_entities: int,
+    max_tokens: int,
+    tokenizer: _Tokenizer | None,
+) -> list[dict[str, Any]]:
+    """Deduplicate and budget NER hints while preserving their source order."""
+    best_by_text: dict[str, tuple[int, dict[str, Any]]] = {}
+    for index, entity in enumerate(entities):
+        key = _entity_text_key(entity)
+        if not key:
+            continue
+        previous = best_by_text.get(key)
+        score = float(entity.get("score") or 0.0)
+        if previous is None or score > float(previous[1].get("score") or 0.0):
+            best_by_text[key] = (index, entity)
+
+    ranked = sorted(
+        best_by_text.values(),
+        key=lambda item: (-float(item[1].get("score") or 0.0), item[0]),
+    )
+    selected: list[tuple[int, dict[str, Any]]] = []
+    used_tokens = 0
+    for item in ranked:
+        if len(selected) >= max_entities:
+            break
+        if tokenizer is not None:
+            hint_tokens = len(tokenizer.encode(f"- {item[1]['text']}\n"))
+            if used_tokens + hint_tokens > max_tokens:
+                continue
+            used_tokens += hint_tokens
+        selected.append(item)
+
+    selected.sort(key=lambda item: item[0])
+    return [entity for _, entity in selected]
 
 
 def _format_ner_entities(entities: list[dict[str, Any]]) -> str:
@@ -104,6 +155,11 @@ async def recognize_entities(
     text: str,
     labels: list[str],
     threshold: float = 0.9,
+    *,
+    flat_ner: bool = True,
+    max_entities: int = 50,
+    max_tokens: int = 400,
+    tokenizer: _Tokenizer | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     if not text or not labels:
         logger.warning("Empty text or labels provided to GLiNER, skipping")
@@ -118,12 +174,17 @@ async def recognize_entities(
             lambda: model.predict_entities(
                 text,
                 labels,
-                flat_ner=False,
+                flat_ner=flat_ner,
                 threshold=threshold,
             ),
         )
 
-        entities = _normalize_gliner_result(list(raw_entities))
+        entities = _select_ner_entities(
+            _normalize_gliner_result(list(raw_entities)),
+            max_entities=max_entities,
+            max_tokens=max_tokens,
+            tokenizer=tokenizer,
+        )
         formatted = _format_ner_entities(entities)
         logger.debug(f"GLiNER recognized {len(entities)} entities")
         return formatted, entities

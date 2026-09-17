@@ -69,6 +69,8 @@ prompts/entity_type/
 
 # Evaluation results
 lightrag/evaluation/results/
+# Generated local analysis outputs (embeddings, candidate pairs, and reports)
+/artifacts/
 
 # Miscellaneous
 .DS_Store

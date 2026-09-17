@@ -3379,6 +3379,10 @@ async def extract_entities(
     entity_types_guidance = prompt_profile["entity_types_guidance"]
     gliner_entity_labels = extract_entity_labels_from_guidance(entity_types_guidance)
     gliner_enabled = global_config.get("enable_gliner_ner", True)
+    gliner_threshold = global_config.get("gliner_ner_threshold", 0.9)
+    gliner_flat_ner = global_config.get("gliner_ner_flat", True)
+    gliner_max_entities = global_config.get("gliner_ner_max_entities", 50)
+    gliner_max_tokens = global_config.get("gliner_ner_max_tokens", 400)
 
     max_total_records = global_config["entity_extract_max_records"]
     max_entity_records = global_config["entity_extract_max_entities"]
@@ -3464,7 +3468,11 @@ async def extract_entities(
             recognized_entities_str, _ = await recognize_entities(
                 content,
                 gliner_entity_labels,
-                threshold=0.3,
+                threshold=gliner_threshold,
+                flat_ner=gliner_flat_ner,
+                max_entities=gliner_max_entities,
+                max_tokens=gliner_max_tokens,
+                tokenizer=extract_tokenizer,
             )
             if recognized_entities_str:
                 recognized_entities_section = (
