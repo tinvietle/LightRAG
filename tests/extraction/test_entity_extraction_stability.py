@@ -332,9 +332,8 @@ def test_entity_extraction_system_prompts_label_examples_as_format_templates():
         prompt = PROMPTS[prompt_key]
         assert "---Output Format Template---" in prompt
         assert "---Examples---" not in prompt
-        assert "output format template only" in prompt
-        assert "not source text" in prompt
-        assert "must never be used as extraction content" in prompt
+        assert "defines structure only" in prompt
+        assert "Never extract its examples" in prompt
 
 
 @pytest.mark.offline
@@ -348,9 +347,25 @@ def test_entity_extraction_prompts_prioritize_explicit_disease_fields():
         prompt = PROMPTS[prompt_key]
         assert "`extracted_disease_name`" in prompt
         assert "`grouped_disease_name`" in prompt
-        assert "MUST extract the exact value of every non-empty field" in prompt
-        assert "output two separate entities" in prompt
+        assert "For each distinct, non-empty value" in prompt
+        assert "These entities are mandatory" in prompt
+        assert "-> `grouped_under` ->" in prompt
+        assert "Do not treat the broader grouped value as redundant" in prompt
         assert "`Disease_disorder`" in prompt
+
+
+@pytest.mark.offline
+def test_entity_extraction_prompts_keep_section_context_backward_compatible():
+    from lightrag.prompt import PROMPTS
+
+    for prompt_key in (
+        "entity_extraction_system_prompt",
+        "entity_extraction_json_system_prompt",
+    ):
+        prompt = PROMPTS[prompt_key]
+        assert "For backward compatibility" in prompt
+        assert "optional `---Section Context---`" in prompt
+        assert "Never extract from or mention it" in prompt
 
 
 @pytest.mark.offline
