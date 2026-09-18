@@ -557,6 +557,24 @@ def parse_args() -> argparse.Namespace:
         "GLINER_NER_MAX_ENTITIES", 50, int
     )
     args.gliner_ner_max_tokens = get_env_value("GLINER_NER_MAX_TOKENS", 400, int)
+    args.enable_quickumls_ner = get_env_value("ENABLE_QUICKUMLS_NER", False, bool)
+    args.quickumls_python = get_env_value(
+        "QUICKUMLS_PYTHON", ".venv-quickumls/bin/python"
+    )
+    args.quickumls_index_dir = get_env_value(
+        "QUICKUMLS_INDEX_DIR", "data/quickumls_data"
+    )
+    args.quickumls_nltk_data = get_env_value(
+        "QUICKUMLS_NLTK_DATA", "data/nltk_data"
+    )
+    args.quickumls_threshold = get_env_value("QUICKUMLS_THRESHOLD", 0.9, float)
+    args.quickumls_window = get_env_value("QUICKUMLS_WINDOW", 10, int)
+    args.quickumls_timeout = get_env_value("QUICKUMLS_TIMEOUT", 30.0, float)
+    args.quickumls_max_entities = get_env_value("QUICKUMLS_MAX_ENTITIES", 50, int)
+    args.quickumls_max_tokens = get_env_value("QUICKUMLS_MAX_TOKENS", 400, int)
+    args.quickumls_semtypes = get_env_value(
+        "QUICKUMLS_SEMTYPES", "T019,T020,T047,T048,T050,T190,T191"
+    )
 
     # --- Per-role LLM configuration (driven by lightrag.ROLES registry) ---
     for spec in ROLES:

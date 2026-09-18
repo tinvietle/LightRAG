@@ -389,6 +389,49 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
     )
     """Maximum token budget for GLiNER hints in an extraction prompt."""
 
+    enable_quickumls_ner: bool = field(
+        default_factory=lambda: get_env_value("ENABLE_QUICKUMLS_NER", False, bool)
+    )
+    """Run optional QuickUMLS pre-recognition in an isolated interpreter."""
+
+    quickumls_python: str = field(
+        default_factory=lambda: get_env_value(
+            "QUICKUMLS_PYTHON", ".venv-quickumls/bin/python", str
+        )
+    )
+    quickumls_index_dir: str = field(
+        default_factory=lambda: get_env_value(
+            "QUICKUMLS_INDEX_DIR", "data/quickumls_data", str
+        )
+    )
+    quickumls_nltk_data: str = field(
+        default_factory=lambda: get_env_value(
+            "QUICKUMLS_NLTK_DATA", "data/nltk_data", str
+        )
+    )
+    quickumls_threshold: float = field(
+        default_factory=lambda: get_env_value("QUICKUMLS_THRESHOLD", 0.9, float)
+    )
+    quickumls_window: int = field(
+        default_factory=lambda: get_env_value("QUICKUMLS_WINDOW", 10, int)
+    )
+    quickumls_timeout: float = field(
+        default_factory=lambda: get_env_value("QUICKUMLS_TIMEOUT", 30.0, float)
+    )
+    quickumls_max_entities: int = field(
+        default_factory=lambda: get_env_value("QUICKUMLS_MAX_ENTITIES", 50, int)
+    )
+    quickumls_max_tokens: int = field(
+        default_factory=lambda: get_env_value("QUICKUMLS_MAX_TOKENS", 400, int)
+    )
+    quickumls_semtypes: str = field(
+        default_factory=lambda: get_env_value(
+            "QUICKUMLS_SEMTYPES",
+            "T019,T020,T047,T048,T050,T190,T191",
+            str,
+        )
+    )
+
     force_llm_summary_on_merge: int = field(
         default=get_env_value(
             "FORCE_LLM_SUMMARY_ON_MERGE", DEFAULT_FORCE_LLM_SUMMARY_ON_MERGE, int
@@ -1336,6 +1379,9 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
 
     async def finalize_storages(self):
         """Asynchronously finalize the storages with improved error handling"""
+        from lightrag.kg.quickumls import close_quickumls_workers
+
+        await close_quickumls_workers()
         if self._storages_status == StoragesStatus.INITIALIZED:
             storages = [
                 ("full_docs", self.full_docs),

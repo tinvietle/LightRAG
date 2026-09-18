@@ -1,0 +1,4 @@
+quickumls==1.4.2
+nltk==3.10.3
+spacy==3.8.16
+unqlite==1.2.0

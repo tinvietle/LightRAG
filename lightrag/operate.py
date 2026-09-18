@@ -62,7 +62,16 @@ from lightrag.chunk_schema import (
     format_parent_headings,
     strip_internal_multimodal_markup_for_extraction,
 )
-from lightrag.kg.ner import extract_entity_labels_from_guidance, recognize_entities
+from lightrag.kg.ner import (
+    _format_ner_entities,
+    _select_ner_entities,
+    extract_entity_labels_from_guidance,
+    recognize_entities,
+)
+from lightrag.kg.quickumls import (
+    DEFAULT_QUICKUMLS_SEMTYPES,
+    recognize_quickumls_entities,
+)
 from lightrag.llm._vision_utils import image_cache_metadata, normalize_image_inputs
 from lightrag.multimodal_case import augment_query_with_image_descriptions
 from lightrag.prompt import PROMPTS, resolve_entity_extraction_prompt_profile
@@ -3383,6 +3392,27 @@ async def extract_entities(
     gliner_flat_ner = global_config.get("gliner_ner_flat", True)
     gliner_max_entities = global_config.get("gliner_ner_max_entities", 50)
     gliner_max_tokens = global_config.get("gliner_ner_max_tokens", 400)
+    quickumls_enabled = global_config.get("enable_quickumls_ner", False)
+    quickumls_python = global_config.get(
+        "quickumls_python", ".venv-quickumls/bin/python"
+    )
+    quickumls_index_dir = global_config.get(
+        "quickumls_index_dir", "data/quickumls_data"
+    )
+    quickumls_nltk_data = global_config.get(
+        "quickumls_nltk_data", "data/nltk_data"
+    )
+    quickumls_threshold = global_config.get("quickumls_threshold", 0.9)
+    quickumls_window = global_config.get("quickumls_window", 10)
+    quickumls_timeout = global_config.get("quickumls_timeout", 30.0)
+    quickumls_max_entities = global_config.get("quickumls_max_entities", 50)
+    quickumls_max_tokens = global_config.get("quickumls_max_tokens", 400)
+    configured_semtypes = global_config.get("quickumls_semtypes", "")
+    quickumls_semtypes = frozenset(
+        value.strip()
+        for value in str(configured_semtypes).split(",")
+        if value.strip()
+    ) or DEFAULT_QUICKUMLS_SEMTYPES
 
     max_total_records = global_config["entity_extract_max_records"]
     max_entity_records = global_config["entity_extract_max_entities"]
@@ -3464,16 +3494,61 @@ async def extract_entities(
         # Create cache keys collector for batch processing
         cache_keys_collector = []
         recognized_entities_section = ""
+        detector_calls = []
         if gliner_enabled:
-            recognized_entities_str, _ = await recognize_entities(
-                content,
-                gliner_entity_labels,
-                threshold=gliner_threshold,
-                flat_ner=gliner_flat_ner,
-                max_entities=gliner_max_entities,
-                max_tokens=gliner_max_tokens,
+            detector_calls.append(
+                recognize_entities(
+                    content,
+                    gliner_entity_labels,
+                    threshold=gliner_threshold,
+                    flat_ner=gliner_flat_ner,
+                    max_entities=gliner_max_entities,
+                    max_tokens=gliner_max_tokens,
+                    tokenizer=extract_tokenizer,
+                )
+            )
+        if quickumls_enabled:
+            detector_calls.append(
+                recognize_quickumls_entities(
+                    content,
+                    python=quickumls_python,
+                    index_dir=quickumls_index_dir,
+                    nltk_data=quickumls_nltk_data,
+                    threshold=quickumls_threshold,
+                    window=quickumls_window,
+                    semtypes=quickumls_semtypes,
+                    timeout=quickumls_timeout,
+                    max_entities=quickumls_max_entities,
+                    max_tokens=quickumls_max_tokens,
+                    tokenizer=extract_tokenizer,
+                )
+            )
+        if detector_calls:
+            detector_results = await asyncio.gather(*detector_calls)
+            combined_entities = []
+            for formatted, entities in detector_results:
+                if entities:
+                    combined_entities.extend(entities)
+                else:
+                    # Keep compatibility with custom recognizers that only
+                    # implement the historical formatted-string return value.
+                    combined_entities.extend(
+                        {
+                            "text": line.removeprefix("- ").strip(),
+                            "score": 0.0,
+                        }
+                        for line in formatted.splitlines()
+                        if line.removeprefix("- ").strip()
+                    )
+            # Keep the original GLiNER prompt budget as the combined detector
+            # budget, so enabling QuickUMLS cannot grow extraction prompts.
+            combined_entities = _select_ner_entities(
+                combined_entities,
+                max_entities=max(gliner_max_entities, quickumls_max_entities),
+                max_tokens=max(gliner_max_tokens, quickumls_max_tokens),
                 tokenizer=extract_tokenizer,
             )
+            recognized_entities_str = _format_ner_entities(combined_entities)
             if recognized_entities_str:
                 recognized_entities_section = (
                     f"<Recognized_Entities_from_NER>\n"

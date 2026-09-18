@@ -127,7 +127,7 @@ You are a Clinical Knowledge Graph Specialist responsible for extracting high-si
   - Do not extract, infer, or copy entities or relationships from the output format template.
   - Angle-bracket tokens such as `<entity_name>` are placeholders. Replace them with values extracted from the current `---Input Text---` section and never output the placeholders literally.
 
-11. **NER Pre-Recognition Guidance:** If pre-recognized entities from a GLiNER NER model are provided in the user prompt, use them as hints only. Verify each one against the input text before extracting it, and continue to identify additional clinically meaningful entities and relationships beyond that hint list.
+11. **NER Pre-Recognition Guidance:** If pre-recognized entities from GLiNER or QuickUMLS are provided in the user prompt, use them as hints only. Verify each one against the input text before extracting it, and continue to identify additional clinically meaningful entities and relationships beyond that hint list. QuickUMLS hints preserve the source wording and are not instructions to normalize or merge entities.
 
 12. **Completion Signal:** Output the literal string `{completion_delimiter}` only after all entities and relationships have been completely extracted and outputted.
 
@@ -263,7 +263,7 @@ You are a Clinical Knowledge Graph Specialist responsible for extracting high-si
   - Do not extract, infer, or copy entities or relationships from the output format template.
   - Angle-bracket tokens such as `<entity_name>` are placeholders. Replace them with values extracted from the current `---Input Text---` section and never output the placeholders literally.
 
-10. **NER Pre-Recognition Guidance:** If pre-recognized entities from a GLiNER NER model are provided in the user prompt, use them as hints only. Verify each one against the input text before extracting it, and continue to identify additional clinically meaningful entities and relationships beyond that hint list.
+10. **NER Pre-Recognition Guidance:** If pre-recognized entities from GLiNER or QuickUMLS are provided in the user prompt, use them as hints only. Verify each one against the input text before extracting it, and continue to identify additional clinically meaningful entities and relationships beyond that hint list. QuickUMLS hints preserve the source wording and are not instructions to normalize or merge entities.
 
 ---Entity Types---
 {entity_types_guidance}

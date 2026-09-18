@@ -35,6 +35,7 @@ def _make_global_config(
     max_gleaning: int = 0,
     prompt_profile: dict | None = None,
     enable_gliner_ner: bool = True,
+    enable_quickumls_ner: bool = False,
 ) -> dict:
     tokenizer = Tokenizer("dummy", DummyTokenizer())
     extract_func = AsyncMock(return_value="")
@@ -59,6 +60,16 @@ def _make_global_config(
         "gliner_ner_flat": True,
         "gliner_ner_max_entities": 50,
         "gliner_ner_max_tokens": 400,
+        "enable_quickumls_ner": enable_quickumls_ner,
+        "quickumls_python": ".venv-quickumls/bin/python",
+        "quickumls_index_dir": "data/quickumls_data",
+        "quickumls_nltk_data": "data/nltk_data",
+        "quickumls_threshold": 0.9,
+        "quickumls_window": 10,
+        "quickumls_timeout": 30.0,
+        "quickumls_max_entities": 50,
+        "quickumls_max_tokens": 400,
+        "quickumls_semtypes": "T047",
         "_entity_extraction_prompt_profile": prompt_profile,
     }
 
@@ -750,6 +761,85 @@ async def test_gliner_can_be_disabled_without_affecting_prompts():
     recognize_mock.assert_not_awaited()
     initial_prompt = llm_func.call_args_list[0][0][0]
     assert "<Recognized_Entities_from_NER>" not in initial_prompt
+
+
+@pytest.mark.offline
+@pytest.mark.asyncio
+async def test_quickumls_only_injects_detection_hints():
+    from lightrag.operate import extract_entities
+
+    global_config = _make_global_config(
+        use_json=False,
+        enable_gliner_ner=False,
+        enable_quickumls_ner=True,
+    )
+    llm_func = global_config["llm_model_func"]
+    llm_func.return_value = _TEXT_MODE_RESPONSE
+    quickumls_entities = [
+        {"text": "liver abscess", "score": 1.0, "source": "quickumls"}
+    ]
+
+    with (
+        patch("lightrag.operate.logger"),
+        patch("lightrag.operate.recognize_entities", new=AsyncMock()) as gliner_mock,
+        patch(
+            "lightrag.operate.recognize_quickumls_entities",
+            new=AsyncMock(return_value=("- liver abscess", quickumls_entities)),
+        ) as quickumls_mock,
+    ):
+        await extract_entities(
+            chunks=_make_chunks("The patient had a liver abscess."),
+            global_config=global_config,
+        )
+
+    gliner_mock.assert_not_awaited()
+    quickumls_mock.assert_awaited_once()
+    prompt = llm_func.call_args_list[0][0][0]
+    assert "- liver abscess" in prompt
+
+
+@pytest.mark.offline
+@pytest.mark.asyncio
+async def test_combined_detectors_deduplicate_surface_text():
+    from lightrag.operate import extract_entities
+
+    global_config = _make_global_config(enable_quickumls_ner=True)
+    llm_func = global_config["llm_model_func"]
+    llm_func.return_value = _TEXT_MODE_RESPONSE
+    gliner_entities = [
+        {"text": "Liver abscess", "score": 0.95, "source": "gliner"}
+    ]
+    quickumls_entities = [
+        {"text": "liver abscess", "score": 1.0, "source": "quickumls"},
+        {"text": "anemia", "score": 1.0, "source": "quickumls"},
+    ]
+
+    with (
+        patch("lightrag.operate.logger"),
+        patch(
+            "lightrag.operate.recognize_entities",
+            new=AsyncMock(return_value=("- Liver abscess", gliner_entities)),
+        ),
+        patch(
+            "lightrag.operate.recognize_quickumls_entities",
+            new=AsyncMock(
+                return_value=("- liver abscess\n- anemia", quickumls_entities)
+            ),
+        ),
+    ):
+        await extract_entities(
+            chunks=_make_chunks("The patient had a liver abscess and anemia."),
+            global_config=global_config,
+        )
+
+    prompt = llm_func.call_args_list[0][0][0]
+    hint_block = re.search(
+        r"<Recognized_Entities_from_NER>\n(.*?)</Recognized_Entities_from_NER>",
+        prompt,
+        re.DOTALL,
+    ).group(1)
+    assert hint_block.casefold().count("liver abscess") == 1
+    assert "- anemia" in hint_block
 
 
 # ---------------------------------------------------------------------------
