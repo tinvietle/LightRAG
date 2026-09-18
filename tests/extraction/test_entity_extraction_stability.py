@@ -348,7 +348,8 @@ def test_entity_extraction_prompts_prioritize_explicit_disease_fields():
         prompt = PROMPTS[prompt_key]
         assert "`extracted_disease_name`" in prompt
         assert "`grouped_disease_name`" in prompt
-        assert "always extract each exact field value" in prompt
+        assert "MUST extract the exact value of every non-empty field" in prompt
+        assert "output two separate entities" in prompt
         assert "`Disease_disorder`" in prompt
 
 
