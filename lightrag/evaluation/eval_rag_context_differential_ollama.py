@@ -26,6 +26,7 @@ from typing import Any
 
 import httpx
 from dotenv import load_dotenv
+from tqdm.auto import tqdm
 
 from lightrag.utils import logger
 
@@ -445,10 +446,33 @@ class RAGContextCollector:
         )
         async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
             tasks = [
-                self.collect_single_case(idx, test_case, semaphore, client)
+                asyncio.create_task(
+                    self.collect_single_case(idx, test_case, semaphore, client)
+                )
                 for idx, test_case in enumerate(self.test_cases, start=1)
             ]
-            return list(await asyncio.gather(*tasks))
+            results: list[dict[str, Any]] = []
+            successful = 0
+            failed = 0
+            with tqdm(
+                total=len(tasks),
+                desc="Collecting cases",
+                unit="case",
+                dynamic_ncols=True,
+            ) as progress:
+                for completed_task in asyncio.as_completed(tasks):
+                    result = await completed_task
+                    results.append(result)
+                    if result.get("error"):
+                        failed += 1
+                    else:
+                        successful += 1
+                    progress.set_postfix(ok=successful, failed=failed, refresh=False)
+                    progress.update()
+
+            # Completion order varies with concurrency; preserve dataset order
+            # in the artifact so baseline and merged files align by index.
+            return sorted(results, key=lambda item: int(item["test_number"]))
 
     def _resolve_output_path(self) -> Path:
         if self.output_path is not None:
