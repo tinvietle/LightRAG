@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""
-RAGAS context-recall evaluation for LightRAG differential diagnosis workflows.
+"""Collect LightRAG answers and retrieval contexts for later evaluation.
 
-This evaluator keeps the current LightRAG evaluation/export style where practical,
-but it is intentionally narrower than ``eval_rag_quality.py``:
-
-- differential-diagnosis query prompt instead of single-answer QA
-- no disease-label parsing or forced answer normalization
-- native Ollama evaluator LLM wrapper
-- RAGAS ``ContextRecall`` only
+Despite the historical filename, this script does not call Ollama or RAGAS. It
+sends each clinical question to LightRAG's ``/query`` endpoint and stores the
+answer and referenced chunks in the evaluator's established JSON shape. Metrics
+are intentionally computed later so the captured output can be scored repeatedly
+without rerunning retrieval.
 """
 
 from __future__ import annotations
@@ -16,115 +13,81 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
-import csv
+import hashlib
 import json
-import math
 import os
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from langchain_core.outputs import Generation, LLMResult
-from ollama import AsyncClient as OllamaAsyncClient
-from ollama import Client as OllamaClient
-from ragas.llms.base import BaseRagasLLM
-from ragas.run_config import RunConfig
 
 from lightrag.utils import logger
-
-if TYPE_CHECKING:
-    from langchain_core.callbacks import Callbacks
-    from langchain_core.prompt_values import PromptValue
 
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 load_dotenv(dotenv_path=".env", override=False)
 
-try:
-    from datasets import Dataset
-    from ragas import evaluate
-    from ragas.metrics import ContextRecall
-    from tqdm.auto import tqdm
-
-    RAGAS_AVAILABLE = True
-except ImportError:
-    RAGAS_AVAILABLE = False
-    Dataset = None
-    evaluate = None
-
-
 CONNECT_TIMEOUT_SECONDS = 360.0
 READ_TIMEOUT_SECONDS = 360.0
 TOTAL_TIMEOUT_SECONDS = 360.0
 MAX_QUERY_IMAGES = 10
-DEFAULT_RESULTS_BASENAME = "results"
+DEFAULT_RESULTS_BASENAME = "retrieval_contexts"
 
 
-def _is_nan(value: Any) -> bool:
-    if value is None:
-        return True
-    try:
-        numeric_value = float(value)
-    except (TypeError, ValueError):
-        return True
-    return math.isnan(numeric_value) or math.isinf(numeric_value)
+def _optional_int(name: str) -> int | None:
+    value = os.getenv(name)
+    return int(value) if value not in (None, "") else None
 
 
-def _sanitize_metric_value(value: Any) -> float | None:
-    if _is_nan(value):
+def _optional_bool(name: str) -> bool | None:
+    value = os.getenv(name)
+    if value in (None, ""):
         return None
-    return float(value)
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
 
 
-def _normalize_ollama_host(host: str | None) -> str:
-    normalized_host = (
-        host or os.getenv("OLLAMA_HOST") or "http://localhost:11434"
-    ).rstrip("/")
-    if normalized_host.endswith("/v1"):
-        return normalized_host[:-3]
-    return normalized_host
+def _with_ranks(items: Any) -> list[dict[str, Any]]:
+    """Copy API records and add their one-based retrieval rank."""
+    if not isinstance(items, list):
+        return []
+    return [
+        {"rank": rank, **item}
+        for rank, item in enumerate(items, start=1)
+        if isinstance(item, dict)
+    ]
 
 
-def _parse_ollama_think(value: str | None) -> bool | str:
-    normalized_value = (value or "").strip().lower()
-    if not normalized_value:
-        return False
-    if normalized_value in {"0", "false", "no", "off"}:
-        return False
-    if normalized_value in {"1", "true", "yes", "on"}:
-        return True
-    if normalized_value in {"low", "medium", "high"}:
-        return normalized_value
-    logger.warning(
-        "Invalid EVAL_OLLAMA_THINK=%s. Falling back to think=False.",
-        value,
-    )
-    return False
+def _file_sha256(path: Path | None) -> str | None:
+    if path is None or not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as file_handle:
+        for block in iter(lambda: file_handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
-def _extract_ollama_content(response: Any) -> str:
-    message = getattr(response, "message", None)
-    if message is None and isinstance(response, dict):
-        message = response.get("message", {})
-    if isinstance(message, dict):
-        return str(message.get("content", ""))
-    return str(getattr(message, "content", ""))
-
-
-def _extract_ollama_done_reason(response: Any) -> str | None:
-    done_reason = getattr(response, "done_reason", None)
-    if done_reason is not None:
-        return str(done_reason)
-    if isinstance(response, dict):
-        raw_done_reason = response.get("done_reason")
-        if raw_done_reason is not None:
-            return str(raw_done_reason)
-    return None
+def _git_revision(repo_root: Path) -> str | None:
+    configured = os.getenv("LIGHTRAG_REVISION")
+    if configured:
+        return configured
+    try:
+        process = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return process.stdout.strip() or None
 
 
 def _coerce_image_paths(test_case: dict[str, Any]) -> list[str]:
@@ -138,19 +101,26 @@ def _coerce_image_paths(test_case: dict[str, Any]) -> list[str]:
     return []
 
 
-@dataclass
-class EvalCaseResult:
+@dataclass(slots=True)
+class RetrievalCaseResult:
+    """One test case in the legacy evaluator shape, without RAGAS fields."""
+
     test_number: int
     question: str
     answer: str
     ground_truth: str
     retrieved_contexts: list[str]
     retrieved_chunks: list[dict[str, Any]]
-    missing_metrics: list[str]
+    references: list[dict[str, Any]]
+    retrieval: dict[str, list[dict[str, Any]]]
+    retrieval_metadata: dict[str, Any]
+    query_configuration: dict[str, Any]
+    experiment: dict[str, Any]
+    request_latency_seconds: float
     project: str
+    file_name: str
     image_count: int
     image_paths: list[str]
-    metrics: dict[str, float | None]
     timestamp: str
     error: str | None = None
 
@@ -163,173 +133,71 @@ class EvalCaseResult:
             "predicted_disease": "",
             "retrieved_contexts": self.retrieved_contexts,
             "retrieved_chunks": self.retrieved_chunks,
-            "missing_metrics": self.missing_metrics,
+            "references": self.references,
+            "retrieval": self.retrieval,
+            "retrieval_metadata": self.retrieval_metadata,
+            "query_configuration": self.query_configuration,
+            "experiment": self.experiment,
+            "request_latency_seconds": self.request_latency_seconds,
             "project": self.project,
+            "file_name": self.file_name,
             "image_count": self.image_count,
             "image_paths": self.image_paths,
-            "error": self.error,
-            "metrics": self.metrics,
             "timestamp": self.timestamp,
+            "error": self.error,
         }
 
 
-@dataclass(kw_only=True)
-class OllamaRagasLLM(BaseRagasLLM):
-    """Minimal native Ollama wrapper for RAGAS."""
-
-    model: str
-    host: str
-    timeout: int
-    think: bool | str = False
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        self.sync_client = OllamaClient(host=self.host, timeout=self.timeout)
-        self.async_client = OllamaAsyncClient(host=self.host, timeout=self.timeout)
-
-    def _chat_options(
-        self,
-        *,
-        temperature: float,
-        stop: list[str] | None,
-    ) -> dict[str, Any]:
-        options: dict[str, Any] = {"temperature": temperature}
-        if stop:
-            options["stop"] = stop
-        return options
-
-    @staticmethod
-    def _prompt_to_text(prompt: "PromptValue") -> str:
-        return prompt.to_string()
-
-    @staticmethod
-    def _build_result(responses: list[Any]) -> LLMResult:
-        return LLMResult(
-            generations=[
-                [
-                    Generation(
-                        text=_extract_ollama_content(response),
-                        generation_info={
-                            "finish_reason": _extract_ollama_done_reason(response)
-                            or "stop"
-                        },
-                    )
-                    for response in responses
-                ]
-            ]
-        )
-
-    def generate_text(
-        self,
-        prompt: "PromptValue",
-        n: int = 1,
-        temperature: float = 0.01,
-        stop: list[str] | None = None,
-        callbacks: "Callbacks" = None,
-    ) -> LLMResult:
-        del callbacks
-        prompt_text = self._prompt_to_text(prompt)
-        responses = [
-            self.sync_client.chat(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt_text}],
-                stream=False,
-                think=self.think,
-                options=self._chat_options(temperature=temperature, stop=stop),
-            )
-            for _ in range(n)
-        ]
-        return self._build_result(responses)
-
-    async def agenerate_text(
-        self,
-        prompt: "PromptValue",
-        n: int = 1,
-        temperature: float | None = 0.01,
-        stop: list[str] | None = None,
-        callbacks: "Callbacks" = None,
-    ) -> LLMResult:
-        del callbacks
-        prompt_text = self._prompt_to_text(prompt)
-        effective_temperature = 0.01 if temperature is None else temperature
-        responses: list[Any] = []
-        for _ in range(n):
-            response = await self.async_client.chat(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt_text}],
-                stream=False,
-                think=self.think,
-                options=self._chat_options(
-                    temperature=effective_temperature,
-                    stop=stop,
-                ),
-            )
-            responses.append(response)
-        return self._build_result(responses)
-
-    @staticmethod
-    def is_finished(response: LLMResult) -> bool:
-        valid_finish_reasons = {"stop", "STOP", "eos_token", "load"}
-        for generation_group in response.generations:
-            for generation in generation_group:
-                finish_reason = None
-                if generation.generation_info is not None:
-                    finish_reason = generation.generation_info.get("finish_reason")
-                if (
-                    finish_reason is not None
-                    and finish_reason not in valid_finish_reasons
-                ):
-                    return False
-        return True
-
-
-class RAGEvaluator:
-    """Evaluate LightRAG retrieval quality for differential diagnosis."""
+class RAGContextCollector:
+    """Collect raw retrieval evidence without calculating quality metrics."""
 
     def __init__(
         self,
         test_dataset_path: str | None = None,
         rag_api_url: str | None = None,
         include_images: bool = True,
-    ):
-        if not RAGAS_AVAILABLE:
-            raise ImportError(
-                "RAGAS dependencies not installed. Install with: pip install ragas datasets"
-            )
-
+        output_path: str | None = None,
+        experiment_name: str | None = None,
+        workspace: str | None = None,
+        merge_plan_path: str | None = None,
+    ) -> None:
         self.repo_root = Path(__file__).resolve().parents[2]
         self.results_dir = Path(__file__).parent / "results"
         self.results_dir.mkdir(exist_ok=True)
 
-        self.eval_model = os.getenv("EVAL_LLM_MODEL", "gpt-oss:120b-cloud")
-        self.eval_llm_base_url = _normalize_ollama_host(
-            os.getenv("EVAL_LLM_BINDING_HOST")
-        )
-        self.eval_timeout = int(os.getenv("EVAL_LLM_TIMEOUT", "180"))
-        self.eval_think = _parse_ollama_think(os.getenv("EVAL_OLLAMA_THINK"))
-        self.eval_max_retries = int(os.getenv("EVAL_LLM_MAX_RETRIES", "5"))
         self.query_top_k = int(os.getenv("EVAL_QUERY_TOP_K", "40"))
-        self.chunk_top_k = int(os.getenv("EVAL_CHUNK_TOP_K", "20"))
+        self.chunk_top_k = int(os.getenv("EVAL_CHUNK_TOP_K", "10"))
         self.max_async = int(os.getenv("EVAL_MAX_CONCURRENT", "2"))
         self.query_mode = os.getenv("EVAL_QUERY_MODE", "hybrid")
-        self.include_images = include_images
+        self.enable_rerank = _optional_bool("EVAL_ENABLE_RERANK")
+        self.max_entity_tokens = _optional_int("EVAL_MAX_ENTITY_TOKENS")
+        self.max_relation_tokens = _optional_int("EVAL_MAX_RELATION_TOKENS")
+        self.max_total_tokens = _optional_int("EVAL_MAX_TOTAL_TOKENS")
         self.response_type = os.getenv("EVAL_RESPONSE_TYPE", "Multiple Paragraphs")
-        self.user_prompt = os.getenv(
-            "EVAL_DIFFERENTIAL_USER_PROMPT",
-            (
-                "Given the clinical case, identify the differential diagnosis and "
-                "provide relevant supporting information from the retrieved contexts."
-            ),
-        )
+        self.user_prompt = os.getenv("EVAL_DIFFERENTIAL_USER_PROMPT") or None
+        self.include_images = include_images
         self.api_key = os.getenv("LIGHTRAG_API_KEY")
-
-        self.eval_llm = OllamaRagasLLM(
-            model=self.eval_model,
-            host=self.eval_llm_base_url,
-            timeout=self.eval_timeout,
-            think=self.eval_think,
-            run_config=RunConfig(timeout=self.eval_timeout),
-        )
+        merge_plan_value = merge_plan_path or os.getenv("EVAL_MERGE_PLAN")
+        self.merge_plan_path = Path(merge_plan_value) if merge_plan_value else None
+        self.query_configuration = {
+            "mode": self.query_mode,
+            "top_k": self.query_top_k,
+            "chunk_top_k": self.chunk_top_k,
+            "enable_rerank": self.enable_rerank,
+            "max_entity_tokens": self.max_entity_tokens,
+            "max_relation_tokens": self.max_relation_tokens,
+            "max_total_tokens": self.max_total_tokens,
+            "response_type": self.response_type,
+            "include_images": self.include_images,
+        }
+        self.experiment = {
+            "name": experiment_name
+            or os.getenv("EVAL_EXPERIMENT_NAME", "unspecified"),
+            "workspace": workspace if workspace is not None else os.getenv("WORKSPACE", ""),
+            "merge_plan": str(self.merge_plan_path) if self.merge_plan_path else None,
+            "merge_plan_sha256": _file_sha256(self.merge_plan_path),
+            "lightrag_revision": _git_revision(self.repo_root),
+        }
 
         if test_dataset_path is None:
             test_dataset_path = str(Path(__file__).parent / "sample_dataset.json")
@@ -338,33 +206,21 @@ class RAGEvaluator:
 
         self.test_dataset_path = self._resolve_existing_path(test_dataset_path)
         self.rag_api_url = rag_api_url.rstrip("/")
+        self.output_path = Path(output_path) if output_path else None
         self.test_cases = self._load_test_dataset()
 
         self._display_configuration()
 
     def _display_configuration(self) -> None:
-        logger.info("Evaluation Model:")
-        logger.info("  • LLM Model:            %s", self.eval_model)
-        logger.info("  • LLM Endpoint:         %s", self.eval_llm_base_url)
-        logger.info("  • Ollama Think Mode:    %s", self.eval_think)
-
-        logger.info("Concurrency & Rate Limiting:")
+        logger.info("Retrieval collection configuration:")
         logger.info("  • Query Mode:           %s", self.query_mode)
-        logger.info(
-            "  • Query Images:         %s",
-            "enabled" if self.include_images else "disabled",
-        )
         logger.info("  • Query Top-K:          %s Entities/Relations", self.query_top_k)
         logger.info("  • Chunk Top-K:          %s Chunks", self.chunk_top_k)
-        logger.info("  • LLM Max Retries:      %s", self.eval_max_retries)
-        logger.info("  • LLM Timeout:          %s seconds", self.eval_timeout)
-        logger.info("  • Eval Concurrency:     %s", self.max_async)
-
-        logger.info("Test Configuration:")
+        logger.info("  • Query Images:         %s", self.include_images)
+        logger.info("  • API Concurrency:      %s", self.max_async)
         logger.info("  • Total Test Cases:     %s", len(self.test_cases))
-        logger.info("  • Test Dataset:         %s", self.test_dataset_path.name)
+        logger.info("  • Test Dataset:         %s", self.test_dataset_path)
         logger.info("  • LightRAG API:         %s", self.rag_api_url)
-        logger.info("  • Results Directory:    %s", self.results_dir.name)
 
     def _resolve_existing_path(self, raw_path: Path | str) -> Path:
         candidate = Path(raw_path)
@@ -383,10 +239,7 @@ class RAGEvaluator:
         resolved_path = self._resolve_existing_path(image_path)
         if resolved_path.exists():
             return resolved_path
-        raise FileNotFoundError(
-            f"Image file not found: {image_path} "
-            f"(tried {Path(image_path)} and {self.repo_root / Path(image_path)})"
-        )
+        raise FileNotFoundError(f"Image file not found: {image_path}")
 
     async def _encode_image_paths(self, image_paths: list[str]) -> list[str]:
         encoded_images: list[str] = []
@@ -412,114 +265,58 @@ class RAGEvaluator:
                 "Unsupported dataset format. Expected a list or an object with test_cases."
             )
 
+        if not isinstance(test_cases, list):
+            raise ValueError("Dataset test_cases must be a list.")
         normalized_cases = [case for case in test_cases if isinstance(case, dict)]
         if len(normalized_cases) != len(test_cases):
             logger.warning(
-                "Skipped %s non-object test case entries while loading %s",
+                "Skipped %s non-object test cases in %s",
                 len(test_cases) - len(normalized_cases),
                 self.test_dataset_path,
             )
         return normalized_cases
 
-    async def generate_rag_response(
+    async def retrieve_context(
         self,
         *,
         question: str,
         client: httpx.AsyncClient,
         image_paths: list[str] | None = None,
     ) -> dict[str, Any]:
-        try:
-            payload: dict[str, Any] = {
-                "query": question,
-                "mode": self.query_mode,
-                "include_references": True,
-                "include_chunk_content": True,
-                "response_type": self.response_type,
-                "top_k": self.query_top_k,
-                "chunk_top_k": self.chunk_top_k,
-                "user_prompt": self.user_prompt,
-            }
-            if self.include_images and image_paths:
-                payload["images"] = await self._encode_image_paths(image_paths)
+        """Call ``/query/full`` and preserve the answer and retrieval evidence."""
+        payload: dict[str, Any] = {
+            "query": question,
+            "mode": self.query_mode,
+            "response_type": self.response_type,
+            "top_k": self.query_top_k,
+            "chunk_top_k": self.chunk_top_k,
+        }
+        if self.user_prompt is not None:
+            payload["user_prompt"] = self.user_prompt
+        optional_parameters = {
+            "enable_rerank": self.enable_rerank,
+            "max_entity_tokens": self.max_entity_tokens,
+            "max_relation_tokens": self.max_relation_tokens,
+            "max_total_tokens": self.max_total_tokens,
+        }
+        payload.update(
+            {key: value for key, value in optional_parameters.items() if value is not None}
+        )
+        if self.include_images and image_paths:
+            payload["images"] = await self._encode_image_paths(image_paths)
 
-            headers = {"X-API-Key": self.api_key} if self.api_key else None
+        headers = {"X-API-Key": self.api_key} if self.api_key else None
+        try:
             response = await client.post(
-                f"{self.rag_api_url}/query",
+                f"{self.rag_api_url}/query/full",
                 json=payload,
                 headers=headers,
             )
             response.raise_for_status()
-
             result = response.json()
-            answer = result.get("response", "No response generated")
-            references = result.get("references", [])
-
-            contexts: list[str] = []
-            retrieved_chunks: list[dict[str, Any]] = []
-            for reference in references:
-                detailed_chunks = reference.get("chunks")
-                if isinstance(detailed_chunks, list):
-                    for chunk in detailed_chunks:
-                        if not isinstance(chunk, dict) or not chunk.get("content"):
-                            continue
-                        content = str(chunk["content"])
-                        contexts.append(content)
-                        retrieved_chunks.append(
-                            {
-                                "reference_id": str(
-                                    reference.get("reference_id", "")
-                                ),
-                                "chunk_id": str(chunk.get("chunk_id", "")),
-                                "filename": str(
-                                    chunk.get(
-                                        "file_path",
-                                        reference.get("file_path", "unknown_source"),
-                                    )
-                                ),
-                                "file_path": str(
-                                    chunk.get(
-                                        "file_path",
-                                        reference.get("file_path", "unknown_source"),
-                                    )
-                                ),
-                                "content": content,
-                            }
-                        )
-                    continue
-
-                # Backward-compatible fallback for older LightRAG servers.
-                content = reference.get("content", [])
-                content_items = content if isinstance(content, list) else [content]
-                for item in content_items:
-                    if not item:
-                        continue
-                    content_text = str(item)
-                    contexts.append(content_text)
-                    retrieved_chunks.append(
-                        {
-                            "reference_id": str(reference.get("reference_id", "")),
-                            "chunk_id": "",
-                            "filename": str(
-                                reference.get("file_path", "unknown_source")
-                            ),
-                            "file_path": str(
-                                reference.get("file_path", "unknown_source")
-                            ),
-                            "content": content_text,
-                        }
-                    )
-
-            return {
-                "answer": answer,
-                "contexts": contexts,
-                "retrieved_chunks": retrieved_chunks,
-            }
-
         except httpx.ConnectError as exc:
             raise RuntimeError(
-                f"Cannot connect to LightRAG API at {self.rag_api_url}\n"
-                "Make sure LightRAG server is running:\n"
-                "python -m lightrag.api.lightrag_server"
+                f"Cannot connect to LightRAG API at {self.rag_api_url}"
             ) from exc
         except httpx.HTTPStatusError as exc:
             raise RuntimeError(
@@ -527,482 +324,267 @@ class RAGEvaluator:
             ) from exc
         except httpx.ReadTimeout as exc:
             raise RuntimeError(
-                f"Request timeout while waiting for LightRAG response for: {question[:100]}"
+                f"LightRAG request timed out for: {question[:100]}"
             ) from exc
-        except Exception as exc:
-            raise RuntimeError(
-                f"Error calling LightRAG API: {type(exc).__name__}: {exc}"
-            ) from exc
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise RuntimeError("LightRAG API returned invalid JSON") from exc
 
-    @staticmethod
-    def _build_failed_case_result(
-        *,
-        idx: int,
-        question: str,
-        ground_truth: str,
-        project: str,
-        image_paths: list[str],
-        error: str,
-        answer: str = "",
-        retrieved_contexts: list[str] | None = None,
-        retrieved_chunks: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        result = EvalCaseResult(
-            test_number=idx,
-            question=question,
-            answer=answer,
-            ground_truth=ground_truth,
-            retrieved_contexts=retrieved_contexts or [],
-            retrieved_chunks=retrieved_chunks or [],
-            missing_metrics=[],
-            project=project,
-            image_count=len(image_paths),
-            image_paths=image_paths,
-            metrics={},
-            timestamp=datetime.now().isoformat(),
-            error=error,
-        )
-        return result.to_dict()
+        if not isinstance(result, dict):
+            raise RuntimeError("LightRAG API returned a non-object JSON response")
 
-    async def evaluate_single_case(
+        data = result.get("data", {})
+        metadata = result.get("metadata", {})
+        llm_response = result.get("llm_response", {})
+        if not all(isinstance(value, dict) for value in (data, metadata, llm_response)):
+            raise RuntimeError("LightRAG /query/full returned an invalid response shape")
+
+        retrieval = {
+            "entities": _with_ranks(data.get("entities", [])),
+            "relationships": _with_ranks(data.get("relationships", [])),
+            "chunks": _with_ranks(data.get("chunks", [])),
+            "references": _with_ranks(data.get("references", [])),
+        }
+        return {
+            "answer": str(llm_response.get("content", "")),
+            "contexts": [
+                str(chunk.get("content", ""))
+                for chunk in retrieval["chunks"]
+                if chunk.get("content")
+            ],
+            "retrieved_chunks": retrieval["chunks"],
+            "references": retrieval["references"],
+            "retrieval": retrieval,
+            "retrieval_metadata": metadata,
+        }
+
+    async def collect_single_case(
         self,
         idx: int,
         test_case: dict[str, Any],
-        rag_semaphore: asyncio.Semaphore,
-        eval_semaphore: asyncio.Semaphore,
+        semaphore: asyncio.Semaphore,
         client: httpx.AsyncClient,
-        position_pool: asyncio.Queue[int],
-        pbar_creation_lock: asyncio.Lock,
     ) -> dict[str, Any]:
-        async with rag_semaphore:
-            question = str(test_case["question"])
-            ground_truth = str(test_case["ground_truth"])
-            project = str(test_case.get("project", "unknown"))
-            image_paths = _coerce_image_paths(test_case)
+        question = str(test_case.get("question", ""))
+        ground_truth = str(test_case.get("ground_truth", ""))
+        project = str(test_case.get("project", "unknown"))
+        file_name = str(test_case.get("file_name", ""))
+        image_paths = _coerce_image_paths(test_case)
+        image_count = min(len(image_paths), MAX_QUERY_IMAGES) if self.include_images else 0
+        request_started_at = time.perf_counter()
 
-            try:
-                rag_response = await self.generate_rag_response(
+        try:
+            if not question.strip():
+                raise ValueError("Test case has an empty question")
+            async with semaphore:
+                response = await self.retrieve_context(
                     question=question,
                     client=client,
                     image_paths=image_paths,
                 )
-            except Exception as exc:
-                logger.error("Error generating response for test %s: %s", idx, exc)
-                return self._build_failed_case_result(
-                    idx=idx,
-                    question=question,
-                    ground_truth=ground_truth,
-                    project=project,
-                    image_paths=image_paths,
-                    error=str(exc),
-                )
-
-            answer = rag_response["answer"]
-            retrieved_contexts = rag_response["contexts"]
-            retrieved_chunks = rag_response["retrieved_chunks"]
-            eval_dataset = Dataset.from_dict(
-                {
-                    "question": [question],
-                    "answer": [answer],
-                    "contexts": [retrieved_contexts],
-                    "ground_truth": [ground_truth],
-                }
+            request_latency = round(time.perf_counter() - request_started_at, 4)
+            result = RetrievalCaseResult(
+                test_number=idx,
+                question=question,
+                answer=response["answer"],
+                ground_truth=ground_truth,
+                retrieved_contexts=response["contexts"],
+                retrieved_chunks=response["retrieved_chunks"],
+                references=response["references"],
+                retrieval=response["retrieval"],
+                retrieval_metadata=response["retrieval_metadata"],
+                query_configuration=dict(self.query_configuration),
+                experiment=dict(self.experiment),
+                request_latency_seconds=request_latency,
+                project=project,
+                file_name=file_name,
+                image_count=image_count,
+                image_paths=image_paths,
+                timestamp=datetime.now().isoformat(),
             )
+        except (RuntimeError, ValueError, FileNotFoundError) as exc:
+            request_latency = round(time.perf_counter() - request_started_at, 4)
+            logger.error("Context collection failed for case %s: %s", idx, exc)
+            result = RetrievalCaseResult(
+                test_number=idx,
+                question=question,
+                answer="",
+                ground_truth=ground_truth,
+                retrieved_contexts=[],
+                retrieved_chunks=[],
+                references=[],
+                retrieval={
+                    "entities": [],
+                    "relationships": [],
+                    "chunks": [],
+                    "references": [],
+                },
+                retrieval_metadata={},
+                query_configuration=dict(self.query_configuration),
+                experiment=dict(self.experiment),
+                request_latency_seconds=request_latency,
+                project=project,
+                file_name=file_name,
+                image_count=image_count,
+                image_paths=image_paths,
+                timestamp=datetime.now().isoformat(),
+                error=str(exc),
+            )
+        return result.to_dict()
 
-            async with eval_semaphore:
-                pbar = None
-                position = None
-                try:
-                    position = await position_pool.get()
-                    async with pbar_creation_lock:
-                        pbar = tqdm(
-                            total=1,
-                            desc=f"Eval-{idx:02d}",
-                            position=position,
-                            leave=False,
-                        )
-                        await asyncio.sleep(0.05)
-
-                    eval_results = evaluate(
-                        dataset=eval_dataset,
-                        metrics=[ContextRecall()],
-                        llm=self.eval_llm,
-                        _pbar=pbar,
-                    )
-                    scores_row = eval_results.to_pandas().iloc[0]
-
-                    context_recall = _sanitize_metric_value(
-                        scores_row.get("context_recall")
-                    )
-                    metrics = {"context_recall": context_recall}
-                    missing_metrics = [
-                        metric_name
-                        for metric_name, metric_value in metrics.items()
-                        if metric_value is None
-                    ]
-
-                    result = EvalCaseResult(
-                        test_number=idx,
-                        question=question,
-                        answer=answer,
-                        ground_truth=ground_truth,
-                        retrieved_contexts=retrieved_contexts,
-                        retrieved_chunks=retrieved_chunks,
-                        missing_metrics=missing_metrics,
-                        project=project,
-                        image_count=len(image_paths),
-                        image_paths=image_paths,
-                        metrics=metrics,
-                        timestamp=datetime.now().isoformat(),
-                    )
-                    return result.to_dict()
-                except Exception as exc:
-                    logger.error("Error evaluating test %s: %s", idx, exc)
-                    return self._build_failed_case_result(
-                        idx=idx,
-                        question=question,
-                        ground_truth=ground_truth,
-                        project=project,
-                        image_paths=image_paths,
-                        answer=answer,
-                        retrieved_contexts=retrieved_contexts,
-                        retrieved_chunks=retrieved_chunks,
-                        error=str(exc),
-                    )
-                finally:
-                    if pbar is not None:
-                        pbar.close()
-                    if position is not None:
-                        await position_pool.put(position)
-
-    async def evaluate_responses(self) -> list[dict[str, Any]]:
-        logger.info("%s", "=" * 70)
-        logger.info("Starting differential-diagnosis context recall evaluation")
-        logger.info("RAGAS Evaluation (Stage 2): %s concurrent", self.max_async)
-        logger.info("%s", "=" * 70)
-
-        rag_semaphore = asyncio.Semaphore(self.max_async * 2)
-        eval_semaphore = asyncio.Semaphore(self.max_async)
-        position_pool: asyncio.Queue[int] = asyncio.Queue()
-        for index in range(self.max_async):
-            await position_pool.put(index)
-        pbar_creation_lock = asyncio.Lock()
-
+    async def collect(self) -> list[dict[str, Any]]:
+        logger.info("Starting raw retrieval-context collection")
+        semaphore = asyncio.Semaphore(self.max_async)
         timeout = httpx.Timeout(
             TOTAL_TIMEOUT_SECONDS,
             connect=CONNECT_TIMEOUT_SECONDS,
             read=READ_TIMEOUT_SECONDS,
         )
         limits = httpx.Limits(
-            max_connections=(self.max_async + 1) * 2,
-            max_keepalive_connections=self.max_async + 1,
+            max_connections=self.max_async + 1,
+            max_keepalive_connections=self.max_async,
         )
-
         async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
             tasks = [
-                self.evaluate_single_case(
-                    idx,
-                    test_case,
-                    rag_semaphore,
-                    eval_semaphore,
-                    client,
-                    position_pool,
-                    pbar_creation_lock,
-                )
+                self.collect_single_case(idx, test_case, semaphore, client)
                 for idx, test_case in enumerate(self.test_cases, start=1)
             ]
             return list(await asyncio.gather(*tasks))
 
-    @staticmethod
-    def _csv_metric(value: Any) -> str:
-        sanitized = _sanitize_metric_value(value)
-        if sanitized is None:
-            return "N/A"
-        return f"{sanitized:.4f}"
-
-    @staticmethod
-    def _format_metric(value: Any, width: int = 6) -> str:
-        sanitized = _sanitize_metric_value(value)
-        if sanitized is None:
-            return "N/A".center(width)
-        return f"{sanitized:.4f}".rjust(width)
-
-    def _export_to_csv(self, results: list[dict[str, Any]]) -> Path:
+    def _resolve_output_path(self) -> Path:
+        if self.output_path is not None:
+            self.output_path.parent.mkdir(parents=True, exist_ok=True)
+            return self.output_path
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_path = self.results_dir / f"{DEFAULT_RESULTS_BASENAME}_{timestamp}.csv"
-        fieldnames = [
-            "test_number",
-            "question",
-            "answer",
-            "ground_truth",
-            "predicted_disease",
-            "retrieved_contexts",
-            "retrieved_chunks",
-            "missing_metrics",
-            "project",
-            "image_count",
-            "image_paths",
-            "faithfulness",
-            "answer_relevance",
-            "context_recall",
-            "context_precision",
-            "status",
-            "timestamp",
-        ]
-
-        with csv_path.open("w", newline="", encoding="utf-8") as file_handle:
-            writer = csv.DictWriter(file_handle, fieldnames=fieldnames)
-            writer.writeheader()
-            for result in results:
-                metrics = result.get("metrics", {})
-                has_metrics = bool(metrics)
-                missing_metrics = result.get("missing_metrics", [])
-                writer.writerow(
-                    {
-                        "test_number": result.get("test_number", ""),
-                        "question": result.get("question", ""),
-                        "answer": result.get("answer", ""),
-                        "ground_truth": result.get("ground_truth", ""),
-                        "predicted_disease": "",
-                        "retrieved_contexts": json.dumps(
-                            result.get("retrieved_contexts", []), ensure_ascii=False
-                        ),
-                        "retrieved_chunks": json.dumps(
-                            result.get("retrieved_chunks", []), ensure_ascii=False
-                        ),
-                        "missing_metrics": json.dumps(
-                            missing_metrics, ensure_ascii=False
-                        ),
-                        "project": result.get("project", "unknown"),
-                        "image_count": result.get("image_count", 0),
-                        "image_paths": json.dumps(
-                            result.get("image_paths", []), ensure_ascii=False
-                        ),
-                        "faithfulness": "N/A",
-                        "answer_relevance": "N/A",
-                        "context_recall": self._csv_metric(
-                            metrics.get("context_recall")
-                        ),
-                        "context_precision": "N/A",
-                        "status": (
-                            "success"
-                            if has_metrics and not missing_metrics
-                            else "partial"
-                            if has_metrics
-                            else "error"
-                        ),
-                        "timestamp": result.get("timestamp", ""),
-                    }
-                )
-
-        return csv_path
-
-    def _display_results_table(self, results: list[dict[str, Any]]) -> None:
-        logger.info("")
-        logger.info("%s", "=" * 90)
-        logger.info("EVALUATION RESULTS SUMMARY")
-        logger.info("%s", "=" * 90)
-        logger.info(
-            "%-4s | %-58s | %6s | %6s",
-            "#",
-            "Question",
-            "CtxRec",
-            "Status",
-        )
-        logger.info("%s", "-" * 90)
-
-        for result in results:
-            test_number = result.get("test_number", 0)
-            question = str(result.get("question", ""))
-            question_display = (
-                question[:55] + "..." if len(question) > 58 else question
-            )
-            metrics = result.get("metrics", {})
-            if metrics:
-                status = "!" if result.get("missing_metrics") else "✓"
-                logger.info(
-                    "%-4d | %-58s | %s | %6s",
-                    test_number,
-                    question_display,
-                    self._format_metric(metrics.get("context_recall"), 6),
-                    status,
-                )
-                continue
-
-            error = str(result.get("error", "Unknown error"))
-            error_display = error[:20] + "..." if len(error) > 23 else error
-            logger.info(
-                "%-4d | %-58s | %6s | ✗ %s",
-                test_number,
-                question_display,
-                "N/A",
-                error_display,
-            )
-
-        logger.info("%s", "=" * 90)
-
-    def _calculate_benchmark_stats(self, results: list[dict[str, Any]]) -> dict[str, Any]:
-        valid_results = [result for result in results if result.get("metrics")]
-        total_tests = len(results)
-        successful_tests = len(valid_results)
-        failed_tests = total_tests - successful_tests
-
-        if not valid_results:
-            return {
-                "total_tests": total_tests,
-                "successful_tests": 0,
-                "failed_tests": failed_tests,
-                "success_rate": 0.0,
-                "average_metrics": {
-                    "faithfulness": 0.0,
-                    "answer_relevance": 0.0,
-                    "context_recall": 0.0,
-                    "context_precision": 0.0,
-                },
-            }
-
-        context_recall_values = [
-            value
-            for value in (
-                _sanitize_metric_value(
-                    result.get("metrics", {}).get("context_recall")
-                )
-                for result in valid_results
-            )
-            if value is not None
-        ]
-        avg_context_recall = (
-            round(sum(context_recall_values) / len(context_recall_values), 4)
-            if context_recall_values
-            else 0.0
-        )
-
-        return {
-            "total_tests": total_tests,
-            "successful_tests": successful_tests,
-            "failed_tests": failed_tests,
-            "success_rate": round(
-                (successful_tests / total_tests * 100) if total_tests else 0.0, 2
-            ),
-            "average_metrics": {
-                "faithfulness": 0.0,
-                "answer_relevance": 0.0,
-                "context_recall": avg_context_recall,
-                "context_precision": 0.0,
-            },
-        }
+        return self.results_dir / f"{DEFAULT_RESULTS_BASENAME}_{timestamp}.json"
 
     async def run(self) -> dict[str, Any]:
-        start_time = time.time()
-        results = await self.evaluate_responses()
-        elapsed_time = time.time() - start_time
-
-        benchmark_stats = self._calculate_benchmark_stats(results)
+        started_at = time.perf_counter()
+        results = await self.collect()
+        elapsed = round(time.perf_counter() - started_at, 2)
+        successful = sum(not result.get("error") for result in results)
+        failed = len(results) - successful
         summary = {
+            "schema_version": 1,
+            "collection_type": "lightrag_answers_and_contexts",
+            "metrics_computed": False,
             "timestamp": datetime.now().isoformat(),
+            "dataset": str(self.test_dataset_path),
+            "rag_api_url": self.rag_api_url,
+            "query_configuration": {
+                **self.query_configuration,
+                "max_concurrent": self.max_async,
+            },
+            "experiment": self.experiment,
             "total_tests": len(results),
-            "elapsed_time_seconds": round(elapsed_time, 2),
-            "benchmark_stats": benchmark_stats,
+            "total_cases": len(results),
+            "successful_cases": successful,
+            "failed_cases": failed,
+            "benchmark_stats": {
+                "total_tests": len(results),
+                "successful_tests": successful,
+                "failed_tests": failed,
+                "success_rate": round(
+                    successful / len(results) * 100 if results else 0.0, 2
+                ),
+            },
+            "elapsed_time_seconds": elapsed,
             "results": results,
         }
 
-        self._display_results_table(results)
+        output_path = self._resolve_output_path()
+        temporary_path = output_path.with_suffix(output_path.suffix + ".tmp")
+        with temporary_path.open("w", encoding="utf-8") as file_handle:
+            json.dump(summary, file_handle, indent=2, ensure_ascii=False)
+        temporary_path.replace(output_path)
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        json_path = self.results_dir / f"{DEFAULT_RESULTS_BASENAME}_{timestamp}.json"
-        with json_path.open("w", encoding="utf-8") as file_handle:
-            json.dump(summary, file_handle, indent=2, allow_nan=False)
-
-        csv_path = self._export_to_csv(results)
-
-        logger.info("")
-        logger.info("%s", "=" * 70)
-        logger.info("EVALUATION COMPLETE")
-        logger.info("%s", "=" * 70)
-        logger.info("Total Tests:    %s", len(results))
-        logger.info("Successful:     %s", benchmark_stats["successful_tests"])
-        logger.info("Failed:         %s", benchmark_stats["failed_tests"])
-        logger.info("Success Rate:   %.2f%%", benchmark_stats["success_rate"])
-        logger.info("Elapsed Time:   %.2f seconds", elapsed_time)
-        if results:
-            logger.info("Avg Time/Test:  %.2f seconds", elapsed_time / len(results))
-
-        logger.info("")
-        logger.info("%s", "=" * 70)
-        logger.info("BENCHMARK RESULTS (Average)")
-        logger.info("%s", "=" * 70)
-        avg = benchmark_stats["average_metrics"]
-        logger.info("Average Context Recall:    %.4f", avg["context_recall"])
-
-        logger.info("")
-        logger.info("%s", "=" * 70)
-        logger.info("GENERATED FILES")
-        logger.info("%s", "=" * 70)
-        logger.info("Results Dir:    %s", self.results_dir.absolute())
-        logger.info("   • CSV:  %s", csv_path.name)
-        logger.info("   • JSON: %s", json_path.name)
-        logger.info("%s", "=" * 70)
-
+        logger.info("Context collection complete")
+        logger.info("  • Total:      %s", len(results))
+        logger.info("  • Successful: %s", successful)
+        logger.info("  • Failed:     %s", failed)
+        logger.info("  • Elapsed:    %.2f seconds", elapsed)
+        logger.info("  • JSON:       %s", output_path.absolute())
         return summary
 
 
-async def main() -> None:
-    try:
-        parser = argparse.ArgumentParser(
-            description=(
-                "RAGAS context recall evaluation for LightRAG differential diagnosis"
-            ),
-            formatter_class=argparse.RawDescriptionHelpFormatter,
-            epilog="""
+# Preserve the old import name for callers that imported this script directly.
+RAGEvaluator = RAGContextCollector
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Collect raw structured LightRAG contexts without RAGAS or answer scoring"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
 Examples:
-  python lightrag/evaluation/eval_rag_context_differential_ollama.py
-  python lightrag/evaluation/eval_rag_context_differential_ollama.py --dataset my_test.json
-  python lightrag/evaluation/eval_rag_context_differential_ollama.py --ragendpoint http://localhost:9621
-  python lightrag/evaluation/eval_rag_context_differential_ollama.py --no-images
-            """,
-        )
-        parser.add_argument(
-            "--dataset",
-            "-d",
-            type=str,
-            default=None,
-            help=(
-                "Path to test dataset JSON file "
-                "(default: sample_dataset.json in evaluation directory)"
-            ),
-        )
-        parser.add_argument(
-            "--ragendpoint",
-            "-r",
-            type=str,
-            default=None,
-            help=(
-                "LightRAG API endpoint URL "
-                "(default: http://localhost:9621 or $LIGHTRAG_API_URL)"
-            ),
-        )
-        parser.add_argument(
-            "--no-images",
-            action="store_false",
-            dest="include_images",
-            help="Do not send dataset images to the LightRAG query API.",
-        )
-        args = parser.parse_args()
+  python lightrag/evaluation/eval_rag_context_differential_ollama.py \\
+    --dataset lightrag/evaluation/fold1_test_subset_0_416.json
+  python lightrag/evaluation/eval_rag_context_differential_ollama.py \\
+    --dataset my_test.json --ragendpoint http://localhost:9621 --no-images
+  python lightrag/evaluation/eval_rag_context_differential_ollama.py \\
+    --dataset my_test.json --output results/baseline_contexts.json
+        """,
+    )
+    parser.add_argument(
+        "--dataset",
+        "-d",
+        default=None,
+        help="Dataset JSON path (default: evaluation/sample_dataset.json)",
+    )
+    parser.add_argument(
+        "--ragendpoint",
+        "-r",
+        default=None,
+        help="LightRAG API URL (default: $LIGHTRAG_API_URL or localhost:9621)",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="Exact output JSON path (default: timestamped file in results/)",
+    )
+    parser.add_argument(
+        "--no-images",
+        action="store_false",
+        dest="include_images",
+        help="Do not send dataset images to the LightRAG query API",
+    )
+    parser.add_argument(
+        "--experiment-name",
+        default=None,
+        help="Experiment label, for example baseline or merged",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        help="Storage workspace identifier recorded in the result",
+    )
+    parser.add_argument(
+        "--merge-plan",
+        default=None,
+        help="Merge-plan path; its SHA-256 is recorded for reproducibility",
+    )
+    return parser.parse_args()
 
-        logger.info("%s", "=" * 70)
-        logger.info("Context Recall Evaluation - Using Real LightRAG API")
-        logger.info("%s", "=" * 70)
 
-        evaluator = RAGEvaluator(
-            test_dataset_path=args.dataset,
-            rag_api_url=args.ragendpoint,
-            include_images=args.include_images,
-        )
-        await evaluator.run()
-    except Exception as exc:
-        logger.exception("Error: %s", exc)
-        sys.exit(1)
+async def main() -> None:
+    args = parse_args()
+    collector = RAGContextCollector(
+        test_dataset_path=args.dataset,
+        rag_api_url=args.ragendpoint,
+        include_images=args.include_images,
+        output_path=args.output,
+        experiment_name=args.experiment_name,
+        workspace=args.workspace,
+        merge_plan_path=args.merge_plan,
+    )
+    await collector.run()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as exc:
+        logger.exception("Context collection failed: %s", exc)
+        sys.exit(1)

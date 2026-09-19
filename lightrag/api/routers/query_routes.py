@@ -220,6 +220,14 @@ class QueryDataResponse(BaseModel):
     )
 
 
+class QueryFullResponse(QueryDataResponse):
+    """Generated answer and the exact structured retrieval data used for it."""
+
+    llm_response: Dict[str, Any] = Field(
+        description="Non-streaming LLM response metadata and generated content"
+    )
+
+
 class StreamChunkResponse(BaseModel):
     """Response model for streaming chunks in NDJSON format"""
 
@@ -507,6 +515,38 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                 return QueryResponse(response=response_content, references=None)
         except Exception as e:
             logger.error(f"Error processing query: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post(
+        "/query/full",
+        response_model=QueryFullResponse,
+        dependencies=[Depends(combined_auth)],
+        summary="Query with full structured retrieval data",
+    )
+    async def query_full(request: QueryRequest):
+        """Return one generated answer and the exact retrieval data used for it.
+
+        Unlike calling ``/query`` and ``/query/data`` separately, this endpoint
+        executes retrieval only once, so entities, relationships, chunks,
+        references, metadata, and the answer all belong to the same query run.
+        """
+        try:
+            param = request.to_query_params(False)
+            param.stream = False
+            result = await rag.aquery_llm(request.query, param=param)
+            llm_response = result.get("llm_response", {})
+            # A non-streaming request should never expose an async iterator, but
+            # force a JSON-safe value at the HTTP boundary if a provider does.
+            llm_response["response_iterator"] = None
+            return QueryFullResponse(
+                status=str(result.get("status", "failure")),
+                message=str(result.get("message", "")),
+                data=result.get("data", {}),
+                metadata=result.get("metadata", {}),
+                llm_response=llm_response,
+            )
+        except Exception as e:
+            logger.error(f"Error processing full query: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     def _build_stream_generator(
