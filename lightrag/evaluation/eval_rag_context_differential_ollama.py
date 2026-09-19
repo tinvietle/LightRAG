@@ -524,6 +524,7 @@ Examples:
     --dataset my_test.json --ragendpoint http://localhost:9621 --no-images
   python lightrag/evaluation/eval_rag_context_differential_ollama.py \\
     --dataset my_test.json --output results/baseline_contexts.json
+    python lightrag/evaluation/eval_rag_context_differential_ollama.py --dataset lightrag/evaluation/fold1_test_subset_0_416.json --output lightrag/evaluation/results/baseline_contexts.json --experiment-name baseline
         """,
     )
     parser.add_argument(
