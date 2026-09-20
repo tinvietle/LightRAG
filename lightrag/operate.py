@@ -4196,18 +4196,22 @@ async def get_keywords_from_query(
 
     # Optionally augment with GLiNER/QuickUMLS hints detected in the query
     # itself. No-op (returns []) unless enable_query_ner_hints is True.
-    ner_suggestions = await _get_query_ner_suggestions(query, global_config)
-    if ner_suggestions:
+    if global_config.get("enable_query_ner_hints", False):
+        ner_suggestions = await _get_query_ner_suggestions(query, global_config)
         ll_keywords = list(ll_keywords) if ll_keywords else []
         seen = {keyword.strip().casefold() for keyword in ll_keywords}
+        added = []
         for suggestion in ner_suggestions:
             key = suggestion.casefold()
             if key and key not in seen:
                 ll_keywords.append(suggestion)
                 seen.add(key)
-        logger.debug(
-            f"Query NER hints contributed {len(ner_suggestions)} candidate "
-            f"low-level keywords"
+                added.append(suggestion)
+        # INFO (not debug) so this is visible with default server logging,
+        # letting you confirm the toggle is actually taking effect.
+        logger.info(
+            f"Query NER hints: detected {len(ner_suggestions)} candidate(s), "
+            f"added {len(added)} new low-level keyword(s): {added}"
         )
 
     return hl_keywords, ll_keywords
@@ -4236,6 +4240,10 @@ async def _get_query_ner_suggestions(
     gliner_enabled = global_config.get("enable_gliner_ner", True)
     quickumls_enabled = global_config.get("enable_quickumls_ner", False)
     if not gliner_enabled and not quickumls_enabled:
+        logger.warning(
+            "enable_query_ner_hints is True but neither enable_gliner_ner nor "
+            "enable_quickumls_ner is enabled, so no detector will run at query time"
+        )
         return []
 
     tokenizer = global_config.get("tokenizer")
