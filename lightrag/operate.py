@@ -4184,7 +4184,8 @@ async def get_keywords_from_query(
     Returns:
         A tuple containing (high_level_keywords, low_level_keywords)
     """
-    # Check if pre-defined keywords are already provided
+    # Check if pre-defined keywords are already provided. Keywords supplied
+    # explicitly by the caller are left untouched by NER augmentation.
     if query_param.hl_keywords or query_param.ll_keywords:
         return query_param.hl_keywords, query_param.ll_keywords
 
@@ -4192,7 +4193,137 @@ async def get_keywords_from_query(
     hl_keywords, ll_keywords = await extract_keywords_only(
         query, query_param, global_config, hashing_kv
     )
+
+    # Optionally augment with GLiNER/QuickUMLS hints detected in the query
+    # itself. No-op (returns []) unless enable_query_ner_hints is True.
+    ner_suggestions = await _get_query_ner_suggestions(query, global_config)
+    if ner_suggestions:
+        ll_keywords = list(ll_keywords) if ll_keywords else []
+        seen = {keyword.strip().casefold() for keyword in ll_keywords}
+        for suggestion in ner_suggestions:
+            key = suggestion.casefold()
+            if key and key not in seen:
+                ll_keywords.append(suggestion)
+                seen.add(key)
+        logger.debug(
+            f"Query NER hints contributed {len(ner_suggestions)} candidate "
+            f"low-level keywords"
+        )
+
     return hl_keywords, ll_keywords
+
+
+async def _get_query_ner_suggestions(
+    query: str,
+    global_config: dict[str, Any],
+) -> list[str]:
+    """Run optional GLiNER/QuickUMLS pre-recognition on the raw query text.
+
+    This is the query-side counterpart to the NER hints already injected into
+    the document entity-extraction prompt. It is fully opt-in: when
+    ``enable_query_ner_hints`` is False (the default), this returns []
+    immediately and no detector is invoked, so the query pipeline behaves
+    exactly as before. When True, it reuses whichever detectors are already
+    configured for document extraction (``enable_gliner_ner`` /
+    ``enable_quickumls_ner``) against the query text and returns their
+    deduplicated surface-text hits for the caller to merge into ll_keywords.
+    """
+    if not global_config.get("enable_query_ner_hints", False):
+        return []
+    if not query:
+        return []
+
+    gliner_enabled = global_config.get("enable_gliner_ner", True)
+    quickumls_enabled = global_config.get("enable_quickumls_ner", False)
+    if not gliner_enabled and not quickumls_enabled:
+        return []
+
+    tokenizer = global_config.get("tokenizer")
+    max_entities = int(global_config.get("query_ner_max_keywords", 15))
+    max_tokens = int(global_config.get("gliner_ner_max_tokens", 400))
+
+    detector_calls = []
+    if gliner_enabled:
+        addon_params = global_config.get("addon_params") or {}
+        use_json_extraction = global_config.get("entity_extraction_use_json", False)
+        prompt_profile = global_config.get("_entity_extraction_prompt_profile")
+        if prompt_profile is None:
+            prompt_profile = resolve_entity_extraction_prompt_profile(
+                addon_params, use_json_extraction
+            )
+        gliner_entity_labels = extract_entity_labels_from_guidance(
+            prompt_profile["entity_types_guidance"]
+        )
+        if gliner_entity_labels:
+            detector_calls.append(
+                recognize_entities(
+                    query,
+                    gliner_entity_labels,
+                    threshold=global_config.get("gliner_ner_threshold", 0.9),
+                    flat_ner=global_config.get("gliner_ner_flat", True),
+                    max_entities=max_entities,
+                    max_tokens=max_tokens,
+                    tokenizer=tokenizer,
+                )
+            )
+
+    if quickumls_enabled:
+        configured_semtypes = global_config.get("quickumls_semtypes", "")
+        quickumls_semtypes = (
+            frozenset(
+                value.strip()
+                for value in str(configured_semtypes).split(",")
+                if value.strip()
+            )
+            or DEFAULT_QUICKUMLS_SEMTYPES
+        )
+        detector_calls.append(
+            recognize_quickumls_entities(
+                query,
+                python=global_config.get(
+                    "quickumls_python", ".venv-quickumls/bin/python"
+                ),
+                index_dir=global_config.get(
+                    "quickumls_index_dir", "data/quickumls_data"
+                ),
+                nltk_data=global_config.get(
+                    "quickumls_nltk_data", "data/nltk_data"
+                ),
+                threshold=global_config.get("quickumls_threshold", 0.9),
+                window=global_config.get("quickumls_window", 10),
+                semtypes=quickumls_semtypes,
+                timeout=global_config.get("quickumls_timeout", 30.0),
+                max_entities=max_entities,
+                max_tokens=max_tokens,
+                tokenizer=tokenizer,
+            )
+        )
+
+    if not detector_calls:
+        return []
+
+    detector_results = await asyncio.gather(*detector_calls, return_exceptions=True)
+
+    combined_entities: list[dict[str, Any]] = []
+    for result in detector_results:
+        if isinstance(result, Exception):
+            logger.error(f"Query-time NER hint detector failed: {result}")
+            continue
+        _, entities = result
+        combined_entities.extend(entities)
+
+    if not combined_entities:
+        return []
+
+    selected = _select_ner_entities(
+        combined_entities,
+        max_entities=max_entities,
+        max_tokens=max_tokens,
+        tokenizer=tokenizer,
+    )
+    return [
+        str(entity.get("text", "")).strip() for entity in selected if entity.get("text")
+    ]
 
 
 def _normalize_keyword_list(raw_values: Any, field_name: str) -> list[str]:

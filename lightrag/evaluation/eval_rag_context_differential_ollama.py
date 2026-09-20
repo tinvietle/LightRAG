@@ -169,7 +169,7 @@ class RAGContextCollector:
         self.query_top_k = int(os.getenv("EVAL_QUERY_TOP_K", "40"))
         self.chunk_top_k = int(os.getenv("EVAL_CHUNK_TOP_K", "10"))
         self.max_async = int(os.getenv("EVAL_MAX_CONCURRENT", "2"))
-        self.query_mode = os.getenv("EVAL_QUERY_MODE", "hybrid")
+        self.query_mode = os.getenv("EVAL_QUERY_MODE", "mix")
         self.enable_rerank = _optional_bool("EVAL_ENABLE_RERANK")
         self.max_entity_tokens = _optional_int("EVAL_MAX_ENTITY_TOKENS")
         self.max_relation_tokens = _optional_int("EVAL_MAX_RELATION_TOKENS")

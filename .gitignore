@@ -57,6 +57,8 @@ rag_storage/
 data/
 data_old/
 /dataset/
+/dataset_old/
+/data_rag_workstation/
 sft_prompt/fold1/
 reasoning_answer/
 reasoning_answer_rag/

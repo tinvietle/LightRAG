@@ -432,6 +432,22 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
         )
     )
 
+    enable_query_ner_hints: bool = field(
+        default_factory=lambda: get_env_value("ENABLE_QUERY_NER_HINTS", False, bool)
+    )
+    """Run GLiNER/QuickUMLS on the query text and add their detections as extra
+    low-level keywords. Master switch: when False, get_keywords_from_query()
+    is byte-identical to the pre-existing LLM-only behavior. When True, it
+    additionally runs whichever of enable_gliner_ner / enable_quickumls_ner
+    are already turned on against the query itself (not just document
+    chunks) and merges their surface-text hits into ll_keywords."""
+
+    query_ner_max_keywords: int = field(
+        default_factory=lambda: get_env_value("QUERY_NER_MAX_KEYWORDS", 15, int)
+    )
+    """Cap on how many deduplicated GLiNER/QuickUMLS suggestions can be
+    appended to ll_keywords per query."""
+
     force_llm_summary_on_merge: int = field(
         default=get_env_value(
             "FORCE_LLM_SUMMARY_ON_MERGE", DEFAULT_FORCE_LLM_SUMMARY_ON_MERGE, int
