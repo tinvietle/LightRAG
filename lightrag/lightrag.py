@@ -4447,6 +4447,7 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
         target_entity: str,
         merge_strategy: dict[str, str] = None,
         target_entity_data: dict[str, Any] = None,
+        flush: bool = True,
     ) -> dict[str, Any]:
         """Asynchronously merge multiple entities into one entity.
 
@@ -4464,6 +4465,15 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
                 - "join_unique": Join all unique values (for fields separated by delimiter)
             target_entity_data: Dictionary of specific values to set for the target entity,
                 overriding any merged values, e.g. {"description": "custom description", "entity_type": "PERSON"}
+            flush: Default True, unchanged behavior: persist affected storages to disk
+                before returning. Pass False when merging many entities back-to-back
+                in a batch (e.g. an offline dedup/normalization pass) and you will
+                flush yourself periodically instead - flushing multi-hundred-MB
+                vector stores after every single merge is otherwise the dominant
+                cost of a large batch. When False, call `index_done_callback()` on
+                `self.chunk_entity_relation_graph`, `self.entities_vdb`,
+                `self.relationships_vdb`, `self.entity_chunks`, and
+                `self.relation_chunks` yourself once you are done with the batch.
 
         Returns:
             Dictionary containing the merged entity information
@@ -4480,6 +4490,7 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
             target_entity_data,
             self.entity_chunks,
             self.relation_chunks,
+            flush=flush,
         )
 
     def merge_entities(
@@ -4488,10 +4499,15 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
         target_entity: str,
         merge_strategy: dict[str, str] = None,
         target_entity_data: dict[str, Any] = None,
+        flush: bool = True,
     ) -> dict[str, Any]:
         return _run_sync(
             lambda: self.amerge_entities(
-                source_entities, target_entity, merge_strategy, target_entity_data
+                source_entities,
+                target_entity,
+                merge_strategy,
+                target_entity_data,
+                flush,
             ),
             sync_name="merge_entities",
             async_name="amerge_entities",

@@ -26,7 +26,8 @@ def iter_cases(root: Path):
             yield json_path, image_paths
 
 
-def upload_case(client: httpx.Client, json_path: Path, image_paths: list[Path]) -> bool:
+def upload_case(client: httpx.Client, json_path: Path, image_paths: list[Path]) -> str:
+    """Returns "uploaded", "duplicate", or "failed"."""
     files: list[tuple[str, tuple[str, object, str]]] = []
     open_files = []
     image_count = 0
@@ -57,16 +58,21 @@ def upload_case(client: httpx.Client, json_path: Path, image_paths: list[Path]) 
         if response.is_success:
             print(f"OK   {json_path} -> {status} track_id={track_id}")
             print(f"Sent {len(files)} files: {[f[1][0] for f in files]}")
-            return True
+            return "uploaded"
 
         detail = payload.get("detail") or payload.get("message") or response.text
+        if response.status_code == 409:
+            print(f"SKIP {json_path} -> already uploaded: {detail}")
+            return "duplicate"
+
         print(f"FAIL {json_path} -> HTTP {response.status_code}: {detail}")
-        return False
+        return "failed"
     finally:
         for handle in open_files:
             handle.close()
-            
-def upload_case_without_images(client: httpx.Client, json_path: Path) -> bool:
+
+def upload_case_without_images(client: httpx.Client, json_path: Path) -> str:
+    """Returns "uploaded", "duplicate", or "failed"."""
     files: list[tuple[str, tuple[str, object, str]]] = []
     open_files = []
 
@@ -88,11 +94,15 @@ def upload_case_without_images(client: httpx.Client, json_path: Path) -> bool:
         if response.is_success:
             print(f"OK   {json_path} -> {status} track_id={track_id}")
             print(f"Sent {len(files)} files: {[f[1][0] for f in files]}")
-            return True
+            return "uploaded"
 
         detail = payload.get("detail") or payload.get("message") or response.text
+        if response.status_code == 409:
+            print(f"SKIP {json_path} -> already uploaded: {detail}")
+            return "duplicate"
+
         print(f"FAIL {json_path} -> HTTP {response.status_code}: {detail}")
-        return False
+        return "failed"
     finally:
         for handle in open_files:
             handle.close()
@@ -123,6 +133,7 @@ def main(root: Path, use_without_images: bool) -> None:
 
     with httpx.Client(base_url=base_url.rstrip("/"), headers=headers, timeout=120.0) as client:
         uploaded = 0
+        duplicates = 0
         skipped = 0
 
         cases = list(iter_cases(root))
@@ -132,23 +143,29 @@ def main(root: Path, use_without_images: bool) -> None:
 
             try:
                 if use_without_images:
-                    success = upload_case_without_images(client, json_path)
+                    result = upload_case_without_images(client, json_path)
                 else:
-                    success = upload_case(client, json_path, image_paths)
+                    result = upload_case(client, json_path, image_paths)
 
-                if success:
+                if result == "uploaded":
                     uploaded += 1
+                elif result == "duplicate":
+                    duplicates += 1
                 else:
                     skipped += 1
             except Exception as exc:
+                result = "failed"
                 skipped += 1
                 print(f"ERR  {json_path} -> {exc}")
 
-            # Give the server five seconds before submitting the next case.
-            if case_index < len(cases) - 1:
+            # Only newly-queued cases trigger background indexing work on the
+            # server, so only they need the pacing delay. Duplicates (409,
+            # rejected before any indexing is scheduled) and hard failures
+            # move straight on to the next case.
+            if result == "uploaded" and case_index < len(cases) - 1:
                 time.sleep(10)
 
-        print(f"Done. uploaded={uploaded} failed={skipped}")
+        print(f"Done. uploaded={uploaded} duplicates={duplicates} failed={skipped}")
 
 
 if __name__ == "__main__":
