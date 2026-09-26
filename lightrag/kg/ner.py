@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
 import os
 import re
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -12,7 +14,24 @@ from lightrag.utils import logger
 DEFAULT_NER_MODEL_CACHE_DIR = Path("./ner_model")
 NER_MODEL_DIR_ENV = "GLINER_MODEL_DIR"
 NER_MODEL_NAME = "Ihor/gliner-biomed-base-v1.0"
-_ner_model_cache: Any | None = None
+
+# GLiNER inference runs CPU-bound PyTorch code inside a recycled worker
+# process pool rather than in-process. GLiNER/PyTorch's native allocations
+# (and glibc's per-thread malloc arenas under concurrent load) accumulate
+# and are never returned to the OS for the life of a process; recycling the
+# worker after a bounded number of tasks caps that growth instead of
+# letting it ratchet upward for the lifetime of the server.
+GLINER_WORKER_MAX_TASKS_ENV = "GLINER_WORKER_MAX_TASKS"
+GLINER_WORKER_POOL_SIZE_ENV = "GLINER_WORKER_POOL_SIZE"
+DEFAULT_WORKER_MAX_TASKS = 200
+DEFAULT_WORKER_POOL_SIZE = 1
+
+_worker_pool: ProcessPoolExecutor | None = None
+_worker_pool_tasks_since_recycle = 0
+
+# Only ever set inside a worker process (module is re-imported fresh under
+# the "spawn" start method, so this starts as None in each new worker).
+_worker_model_cache: Any | None = None
 
 _ENTITY_TYPE_LINE_RE = re.compile(r"^\s*[-*]\s*`?([^:`]+?)`?\s*:")
 
@@ -123,32 +142,87 @@ def get_ner_model_cache_dir() -> Path:
     return DEFAULT_NER_MODEL_CACHE_DIR
 
 
-def _load_ner_model_sync() -> Any:
+def _get_worker_model_sync() -> Any:
+    """Lazily load + cache GLiNER once per worker process.
+
+    Runs inside the recycled worker process under normal operation (or
+    in-process under test doubles that bypass the real executor). Each
+    fresh worker process re-imports this module, so the cache starts empty
+    again after every recycle.
+    """
+    global _worker_model_cache
+
+    if _worker_model_cache is not None:
+        return _worker_model_cache
+
     from gliner import GLiNER
 
-    return GLiNER.from_pretrained(
-        NER_MODEL_NAME,
-        cache_dir=str(get_ner_model_cache_dir()),
-    )
-
-
-async def _load_ner_model(force_reload: bool = False) -> Any:
-    global _ner_model_cache
-
-    if _ner_model_cache is not None and not force_reload:
-        logger.debug("Using cached GLiNER model")
-        return _ner_model_cache
-
-    logger.info(f"Loading GLiNER model from {NER_MODEL_NAME}...")
+    logger.info(f"Loading GLiNER model from {NER_MODEL_NAME} in worker process...")
     cache_dir = get_ner_model_cache_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    loop = asyncio.get_running_loop()
-    model = await loop.run_in_executor(None, _load_ner_model_sync)
-
-    _ner_model_cache = model
+    _worker_model_cache = GLiNER.from_pretrained(
+        NER_MODEL_NAME,
+        cache_dir=str(cache_dir),
+    )
     logger.info("GLiNER model loaded successfully")
-    return model
+    return _worker_model_cache
+
+
+def _worker_predict(
+    text: str, labels: list[str], threshold: float, flat_ner: bool
+) -> list[dict[str, Any]]:
+    """Entry point executed inside the worker process.
+
+    Only picklable plain args in, only picklable plain dicts out — GLiNER's
+    own result objects aren't guaranteed picklable across the process
+    boundary, so normalization happens here rather than in the caller.
+    """
+    model = _get_worker_model_sync()
+    raw_entities = model.predict_entities(
+        text, labels, flat_ner=flat_ner, threshold=threshold
+    )
+    return _normalize_gliner_result(list(raw_entities))
+
+
+def _get_worker_pool() -> ProcessPoolExecutor:
+    """Return the persistent GLiNER worker pool, recycling it once it has
+    handled ``GLINER_WORKER_MAX_TASKS`` tasks.
+
+    A fresh worker process starts with a clean allocator (no accumulated
+    malloc arenas, no cached PyTorch scratch buffers) so recycling caps the
+    long-run memory growth instead of letting a single long-lived worker
+    ratchet upward for the server's whole lifetime. Uses the "spawn" start
+    method rather than "fork": this pool is created from inside a live
+    asyncio/uvicorn server process with open DB connection pools, and
+    forking that process risks inheriting half-open connections or a lock
+    held by another thread at fork time.
+    """
+    global _worker_pool, _worker_pool_tasks_since_recycle
+
+    max_tasks = int(
+        os.getenv(GLINER_WORKER_MAX_TASKS_ENV, str(DEFAULT_WORKER_MAX_TASKS))
+    )
+
+    if _worker_pool is not None and _worker_pool_tasks_since_recycle >= max_tasks:
+        logger.info(
+            f"Recycling GLiNER worker pool after {_worker_pool_tasks_since_recycle} tasks"
+        )
+        _worker_pool.shutdown(wait=False, cancel_futures=False)
+        _worker_pool = None
+
+    if _worker_pool is None:
+        pool_size = int(
+            os.getenv(GLINER_WORKER_POOL_SIZE_ENV, str(DEFAULT_WORKER_POOL_SIZE))
+        )
+        _worker_pool = ProcessPoolExecutor(
+            max_workers=pool_size,
+            mp_context=multiprocessing.get_context("spawn"),
+        )
+        _worker_pool_tasks_since_recycle = 0
+
+    _worker_pool_tasks_since_recycle += 1
+    return _worker_pool
 
 
 async def recognize_entities(
@@ -166,21 +240,14 @@ async def recognize_entities(
         return "", []
 
     try:
-        model = await _load_ner_model()
-
         loop = asyncio.get_running_loop()
-        raw_entities = await loop.run_in_executor(
-            None,
-            lambda: model.predict_entities(
-                text,
-                labels,
-                flat_ner=flat_ner,
-                threshold=threshold,
-            ),
+        pool = _get_worker_pool()
+        normalized_entities = await loop.run_in_executor(
+            pool, _worker_predict, text, labels, threshold, flat_ner
         )
 
         entities = _select_ner_entities(
-            _normalize_gliner_result(list(raw_entities)),
+            normalized_entities,
             max_entities=max_entities,
             max_tokens=max_tokens,
             tokenizer=tokenizer,

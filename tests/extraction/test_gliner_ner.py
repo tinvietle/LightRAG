@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -11,8 +11,8 @@ class CharacterTokenizer:
 
 
 class ImmediateExecutorLoop:
-    async def run_in_executor(self, executor, function):
-        return function()
+    async def run_in_executor(self, executor, function, *args):
+        return function(*args)
 
 
 @pytest.mark.offline
@@ -22,7 +22,10 @@ async def test_recognize_entities_uses_flat_ner_and_conservative_threshold():
     model.predict_entities.return_value = []
 
     with (
-        patch("lightrag.kg.ner._load_ner_model", new=AsyncMock(return_value=model)),
+        patch(
+            "lightrag.kg.ner._get_worker_model_sync", new=Mock(return_value=model)
+        ),
+        patch("lightrag.kg.ner._get_worker_pool", new=Mock(return_value=None)),
         patch(
             "lightrag.kg.ner.asyncio.get_running_loop",
             return_value=ImmediateExecutorLoop(),
@@ -67,7 +70,10 @@ async def test_recognize_entities_deduplicates_text_and_preserves_offsets():
     ]
 
     with (
-        patch("lightrag.kg.ner._load_ner_model", new=AsyncMock(return_value=model)),
+        patch(
+            "lightrag.kg.ner._get_worker_model_sync", new=Mock(return_value=model)
+        ),
+        patch("lightrag.kg.ner._get_worker_pool", new=Mock(return_value=None)),
         patch(
             "lightrag.kg.ner.asyncio.get_running_loop",
             return_value=ImmediateExecutorLoop(),
@@ -92,7 +98,10 @@ async def test_recognize_entities_applies_confidence_ranked_prompt_budgets():
     ]
 
     with (
-        patch("lightrag.kg.ner._load_ner_model", new=AsyncMock(return_value=model)),
+        patch(
+            "lightrag.kg.ner._get_worker_model_sync", new=Mock(return_value=model)
+        ),
+        patch("lightrag.kg.ner._get_worker_pool", new=Mock(return_value=None)),
         patch(
             "lightrag.kg.ner.asyncio.get_running_loop",
             return_value=ImmediateExecutorLoop(),
