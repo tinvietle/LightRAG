@@ -62,6 +62,7 @@ data_old/
 /data_rag_workstation_merged/
 /data_rag_workstation_merged.zip
 *.zip
+/structured_rag_*/
 sft_prompt/fold1/
 reasoning_answer/
 reasoning_answer_rag/
