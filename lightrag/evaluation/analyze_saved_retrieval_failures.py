@@ -15,6 +15,7 @@ from lightrag.evaluation.eval_saved_contexts import (
     extract_source_labels,
     labels_match,
     normalize_label,
+    record_disease_label,
 )
 
 
@@ -28,7 +29,7 @@ def load_corpus_documents(path: Path) -> dict[str, set[str]]:
                 continue
             if not isinstance(record, dict):
                 continue
-            extracted = str(record.get("extracted_disease_name", ""))
+            extracted = record_disease_label(record, "extracted_disease_name")
             if extracted:
                 labels[normalize_label(extracted)].add(case_path.name)
         return labels

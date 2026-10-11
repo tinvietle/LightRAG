@@ -16,10 +16,13 @@ from typing import Any
 EVALUATION_K = (1, 3, 5, 10)
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 NUMBERED_DIAGNOSIS_RE = re.compile(
-    r"(?:^|[;\n])\s*([1-5])\s*[.)]\s*(.+?)"
+    r"(?:^|[;\n])\s*(?:#{1,6}\s*)?([1-5])\s*[.)]\s*(.+?)"
     r"(?=(?:[;\n]\s*[1-5]\s*[.)])|(?:\n\s*#{1,6}\s)|$)",
     re.DOTALL,
 )
+# Answers that attach evidence bullets to each diagnosis can put item 5 well past
+# 6,000 characters; bounded so a later, unrelated numbered list is not misread.
+RANKED_LIST_WINDOW_CHARS = 12000
 TOP_LIST_MARKER_RE = re.compile(
     r"top\s+5\s+(?:possible\s+)?(?:diseases|diagnoses)\s+are\s*:",
     re.IGNORECASE,
@@ -54,9 +57,14 @@ def extract_source_labels(content: str) -> tuple[str, str]:
     if not isinstance(decoded, dict):
         return "", ""
     return (
-        str(decoded.get("extracted_disease_name", "")),
-        str(decoded.get("grouped_disease_name", "")),
+        record_disease_label(decoded, "extracted_disease_name"),
+        record_disease_label(decoded, "grouped_disease_name"),
     )
+
+
+def record_disease_label(record: dict[str, Any], field: str) -> str:
+    """Read a disease label, accepting the structured corpus' ``snomed_`` prefix."""
+    return str(record.get(field) or record.get(f"snomed_{field}") or "")
 
 
 def extract_ranked_diagnoses(answer: str) -> list[str]:
@@ -64,7 +72,7 @@ def extract_ranked_diagnoses(answer: str) -> list[str]:
     compact = answer.replace("**", "").replace("__", "")
     marker = TOP_LIST_MARKER_RE.search(compact)
     candidate = compact[marker.end() :] if marker else compact
-    candidate = candidate[:6000]
+    candidate = candidate[:RANKED_LIST_WINDOW_CHARS]
     diagnoses: dict[int, str] = {}
     for match in NUMBERED_DIAGNOSIS_RE.finditer(candidate):
         rank = int(match.group(1))
@@ -125,7 +133,9 @@ def load_corpus_label_counts(corpus_path: Path) -> Counter[str]:
             continue
         record = data[0] if isinstance(data, list) and data else data
         if isinstance(record, dict):
-            label = normalize_label(str(record.get("extracted_disease_name", "")))
+            label = normalize_label(
+                record_disease_label(record, "extracted_disease_name")
+            )
             if label:
                 counts[label] += 1
     return counts
