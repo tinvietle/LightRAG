@@ -36,6 +36,22 @@ EXPECTED_TYPES = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--storage-backend",
+        choices=("json", "pg"),
+        default="json",
+        help=(
+            "json: read kv_store_*.json from --storage (default, unchanged "
+            "behavior). pg: read the same data from Postgres via POSTGRES_* "
+            "env vars; --storage is ignored in this mode."
+        ),
+    )
+    parser.add_argument(
+        "--pg-workspace",
+        type=str,
+        default=None,
+        help="Overrides the WORKSPACE env var when --storage-backend pg is used.",
+    )
     parser.add_argument("--storage", type=Path, default=Path("data/rag_storage"))
     parser.add_argument(
         "--output",
@@ -141,10 +157,30 @@ def umls_metrics(path: Path, names: set[str]) -> dict[str, float | int] | None:
 
 def main() -> int:
     args = parse_args()
-    cache = load_json(args.storage / "kv_store_llm_response_cache.json")
-    chunks = load_json(args.storage / "kv_store_text_chunks.json")
-    final_entities = load_json(args.storage / "kv_store_entity_chunks.json")
-    final_relations = load_json(args.storage / "kv_store_relation_chunks.json")
+    if args.storage_backend == "pg":
+        from pg_storage import PgConnectionParams, load_workspace
+
+        params = PgConnectionParams.from_env(workspace=args.pg_workspace)
+        data = load_workspace(
+            params,
+            want={
+                "llm_response_cache",
+                "text_chunks",
+                "entity_chunks",
+                "relation_chunks",
+            },
+        )
+        cache = data.llm_response_cache
+        chunks = data.text_chunks
+        final_entities = data.entity_chunks
+        final_relations = data.relation_chunks
+        dataset_label = params.describe()
+    else:
+        cache = load_json(args.storage / "kv_store_llm_response_cache.json")
+        chunks = load_json(args.storage / "kv_store_text_chunks.json")
+        final_entities = load_json(args.storage / "kv_store_entity_chunks.json")
+        final_relations = load_json(args.storage / "kv_store_relation_chunks.json")
+        dataset_label = str(args.storage)
 
     responses_by_chunk: dict[str, dict[str, str]] = defaultdict(dict)
     for record in cache.values():
@@ -231,7 +267,7 @@ def main() -> int:
         for stages in responses_by_chunk.values()
     )
     summary = {
-        "dataset": str(args.storage),
+        "dataset": dataset_label,
         "paired_chunks": paired_chunks,
         "parse_failures": parse_failures,
         "entities": {

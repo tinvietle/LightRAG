@@ -20,6 +20,7 @@ from build_entity_merge_plan import (
     read_json_object,
     write_json_atomic,
 )
+from pg_storage import PgConnectionParams, load_workspace
 
 
 LEXICAL_KEY_RE = re.compile(r"[^a-z0-9]+")
@@ -67,11 +68,22 @@ def analyze(
     sapbert_path: Path,
     threshold: float,
     example_limit: int,
+    *,
+    storage_backend: str = "json",
+    pg_workspace: str | None = None,
 ) -> dict[str, Any]:
-    entity_names = set(
-        read_json_object(storage / "kv_store_entity_chunks.json")
-    )
-    metadata = load_graph_metadata(storage / "graph_chunk_entity_relation.graphml")
+    if storage_backend == "pg":
+        params = PgConnectionParams.from_env(workspace=pg_workspace)
+        data = load_workspace(params, want={"entity_chunks"}, want_graph=True)
+        entity_names = set(data.entity_chunks)
+        metadata = data.graph_metadata
+        storage_label = params.describe()
+    else:
+        entity_names = set(
+            read_json_object(storage / "kv_store_entity_chunks.json")
+        )
+        metadata = load_graph_metadata(storage / "graph_chunk_entity_relation.graphml")
+        storage_label = str(storage)
 
     exact_groups: dict[str, list[str]] = defaultdict(list)
     for name in entity_names:
@@ -165,7 +177,7 @@ def analyze(
     caught_conflicting = sapbert_counts["type_disagreement_conflicting_cui"]
     return {
         "configuration": {
-            "storage": str(storage),
+            "storage": storage_label,
             "umls_evaluation": str(umls_path),
             "sapbert_candidates": str(sapbert_path),
             "threshold": threshold,
@@ -216,6 +228,22 @@ def analyze(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--storage-backend",
+        choices=("json", "pg"),
+        default="json",
+        help=(
+            "json: read kv_store_*.json/graphml from --storage (default, "
+            "unchanged behavior). pg: read the same data from Postgres via "
+            "POSTGRES_* env vars; --storage is ignored in this mode."
+        ),
+    )
+    parser.add_argument(
+        "--pg-workspace",
+        type=str,
+        default=None,
+        help="Overrides the WORKSPACE env var when --storage-backend pg is used.",
+    )
     parser.add_argument("--storage", type=Path, default=Path("data/rag_storage"))
     parser.add_argument(
         "--umls-evaluation",
@@ -245,6 +273,8 @@ def main() -> int:
         args.sapbert_candidates,
         args.threshold,
         args.example_limit,
+        storage_backend=args.storage_backend,
+        pg_workspace=args.pg_workspace,
     )
     write_json_atomic(args.output, report)
     print(json.dumps(report, indent=2, ensure_ascii=False))

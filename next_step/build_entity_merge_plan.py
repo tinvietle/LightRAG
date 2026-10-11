@@ -19,6 +19,14 @@ import tempfile
 from typing import Any, Iterable, Iterator
 import xml.etree.ElementTree as ET
 
+from pg_storage import (
+    PgConnectionParams,
+    fingerprints_to_manifest,
+    load_workspace,
+    snapshot_tables,
+    verify_fingerprints_unchanged,
+)
+
 
 DISEASE_FIELD_RE = re.compile(
     r'"(?P<field>grouped_disease_name|extracted_disease_name)"\s*:\s*'
@@ -147,6 +155,22 @@ class DisjointSet:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--storage-backend",
+        choices=("json", "pg"),
+        default="json",
+        help=(
+            "json: read kv_store_*.json/graphml from --storage (default, "
+            "unchanged behavior). pg: read the same data from Postgres via "
+            "POSTGRES_* env vars; --storage is ignored in this mode."
+        ),
+    )
+    parser.add_argument(
+        "--pg-workspace",
+        type=str,
+        default=None,
+        help="Overrides the WORKSPACE env var when --storage-backend pg is used.",
+    )
     parser.add_argument("--storage", type=Path, default=Path("data/rag_storage"))
     parser.add_argument(
         "--umls-evaluation",
@@ -430,25 +454,58 @@ def analyze(
     list[dict[str, Any]],
     dict[str, Any],
 ]:
-    if args.output_dir.resolve().is_relative_to(args.storage.resolve()):
+    pg_backend = args.storage_backend == "pg"
+    pg_params: PgConnectionParams | None = None
+    pg_fingerprint_before: dict[str, Any] | None = None
+
+    if not pg_backend and args.output_dir.resolve().is_relative_to(args.storage.resolve()):
         raise ValueError("--output-dir must be outside the LightRAG storage directory")
-    storage_files = {
-        "full_docs": args.storage / "kv_store_full_docs.json",
-        "entity_chunks": args.storage / "kv_store_entity_chunks.json",
-        "text_chunks": args.storage / "kv_store_text_chunks.json",
-        "doc_status": args.storage / "kv_store_doc_status.json",
-        "graph": args.storage / "graph_chunk_entity_relation.graphml",
-    }
-    input_paths = [*storage_files.values(), args.umls_evaluation, args.sapbert_candidates]
-    snapshots = [
+
+    # umls_evaluation / sapbert_candidates are always real local files
+    # (precomputed QuickUMLS/SapBERT artifacts), regardless of storage
+    # backend, so they're always snapshotted this way.
+    external_input_paths = [args.umls_evaluation, args.sapbert_candidates]
+    external_snapshots = [
         snapshot_file(path, include_hash=not args.skip_input_hashes)
-        for path in input_paths
+        for path in external_input_paths
     ]
 
-    full_docs = read_json_object(storage_files["full_docs"])
-    entity_chunks = read_json_object(storage_files["entity_chunks"])
-    text_chunks = read_json_object(storage_files["text_chunks"])
-    doc_status = read_json_object(storage_files["doc_status"])
+    if pg_backend:
+        pg_params = PgConnectionParams.from_env(workspace=args.pg_workspace)
+        pg_fingerprint_before = fingerprints_to_manifest(
+            pg_params, snapshot_tables(pg_params)
+        )
+        data = load_workspace(
+            pg_params,
+            want={"full_docs", "entity_chunks", "text_chunks", "doc_status"},
+            want_graph=True,
+        )
+        full_docs = data.full_docs
+        entity_chunks = data.entity_chunks
+        text_chunks = data.text_chunks
+        doc_status = data.doc_status
+        graph_metadata = data.graph_metadata
+        snapshots = external_snapshots
+    else:
+        storage_files = {
+            "full_docs": args.storage / "kv_store_full_docs.json",
+            "entity_chunks": args.storage / "kv_store_entity_chunks.json",
+            "text_chunks": args.storage / "kv_store_text_chunks.json",
+            "doc_status": args.storage / "kv_store_doc_status.json",
+            "graph": args.storage / "graph_chunk_entity_relation.graphml",
+        }
+        storage_snapshots = [
+            snapshot_file(path, include_hash=not args.skip_input_hashes)
+            for path in storage_files.values()
+        ]
+        snapshots = storage_snapshots + external_snapshots
+
+        full_docs = read_json_object(storage_files["full_docs"])
+        entity_chunks = read_json_object(storage_files["entity_chunks"])
+        text_chunks = read_json_object(storage_files["text_chunks"])
+        doc_status = read_json_object(storage_files["doc_status"])
+        graph_metadata = load_graph_metadata(storage_files["graph"])
+
     active_documents = active_document_ids(doc_status)
     if active_documents:
         sample = ", ".join(active_documents[:5])
@@ -457,7 +514,6 @@ def analyze(
             f"ingestion to finish. Examples: {sample}"
         )
     entity_names = set(entity_chunks)
-    graph_metadata = load_graph_metadata(storage_files["graph"])
     document_labels = {
         doc_id: extract_document_label(record) for doc_id, record in full_docs.items()
     }
@@ -733,7 +789,7 @@ def analyze(
     entity_count = len(entity_names)
     summary = {
         "configuration": {
-            "storage": str(args.storage),
+            "storage": pg_params.describe() if pg_backend else str(args.storage),
             "umls_evaluation": str(args.umls_evaluation),
             "sapbert_candidates": str(args.sapbert_candidates),
             "sapbert_threshold": args.threshold,
@@ -795,9 +851,10 @@ def analyze(
         ],
     }
     verify_inputs_unchanged(snapshots)
-    manifest = {
+    manifest: dict[str, Any] = {
         "analysis_only": True,
         "storage_modified": False,
+        "backend": "pg" if pg_backend else "json",
         "input_files": snapshots,
         "outputs": {
             "merge_plan": "merge_plan.jsonl",
@@ -806,6 +863,21 @@ def analyze(
             "manifest": "manifest.json",
         },
     }
+    if pg_backend:
+        pg_fingerprint_after = fingerprints_to_manifest(
+            pg_params, snapshot_tables(pg_params)
+        )
+        drift = verify_fingerprints_unchanged(
+            pg_fingerprint_before, snapshot_tables(pg_params)
+        )
+        if drift:
+            raise ValueError(
+                "Postgres storage changed during analysis; wait for ingestion "
+                "to finish and re-run: " + "; ".join(drift)
+            )
+        manifest["pg_connection"] = pg_fingerprint_after["connection"]
+        manifest["pg_fingerprint_before"] = pg_fingerprint_before["tables"]
+        manifest["pg_fingerprint_after"] = pg_fingerprint_after["tables"]
     return plans, summary, rejections, snapshots, manifest
 
 

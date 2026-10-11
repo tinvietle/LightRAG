@@ -44,6 +44,22 @@ def parse_args() -> argparse.Namespace:
         description="Evaluate QuickUMLS coverage of LightRAG entity names."
     )
     parser.add_argument(
+        "--storage-backend",
+        choices=("json", "pg"),
+        default="json",
+        help=(
+            "json: read --full-entities from disk (default, unchanged "
+            "behavior). pg: read full_entities from Postgres via POSTGRES_* "
+            "env vars; --full-entities is ignored in this mode."
+        ),
+    )
+    parser.add_argument(
+        "--pg-workspace",
+        type=str,
+        default=None,
+        help="Overrides the WORKSPACE env var when --storage-backend pg is used.",
+    )
+    parser.add_argument(
         "--full-entities",
         type=Path,
         default=Path("data_old/rag_storage/kv_store_full_entities.json"),
@@ -116,7 +132,14 @@ def load_entity_document_frequencies(path: Path) -> Counter[str]:
         raise ValueError(f"Full-entities storage not found: {path}") from error
     except json.JSONDecodeError as error:
         raise ValueError(f"Invalid JSON in full-entities storage: {path}") from error
+    return entity_document_frequencies_from_payload(payload)
 
+
+def entity_document_frequencies_from_payload(
+    payload: dict[str, Any],
+) -> Counter[str]:
+    """Shared by the JSON-file and Postgres loading paths: both produce the
+    same {doc_id: {"entity_names": [...]}} shape before reaching here."""
     frequencies: Counter[str] = Counter()
     for document in payload.values():
         names = document.get("entity_names", [])
@@ -388,7 +411,14 @@ def create_matcher(args: argparse.Namespace) -> Any:
 
 def main() -> int:
     args = parse_args()
-    frequencies = load_entity_document_frequencies(args.full_entities)
+    if args.storage_backend == "pg":
+        from pg_storage import PgConnectionParams, load_workspace
+
+        params = PgConnectionParams.from_env(workspace=args.pg_workspace)
+        data = load_workspace(params, want={"full_entities"})
+        frequencies = entity_document_frequencies_from_payload(data.full_entities)
+    else:
+        frequencies = load_entity_document_frequencies(args.full_entities)
     names = sorted(frequencies)
     if args.max_entities is not None:
         names = names[: args.max_entities]
@@ -427,7 +457,11 @@ def main() -> int:
                 )
 
     configuration = {
-        "full_entities": str(args.full_entities),
+        "full_entities": (
+            f"pg:{args.pg_workspace or 'default'}"
+            if args.storage_backend == "pg"
+            else str(args.full_entities)
+        ),
         "quickumls_index": str(args.quickumls_index),
         "threshold": args.threshold,
         "auto_threshold": args.auto_threshold,

@@ -55,7 +55,13 @@ from typing import Any
 # `build_entity_merge_plan.py` lives next to this file; running this script as
 # `python next_step/apply_entity_merge_plan.py` puts `next_step/` on sys.path[0]
 # so this import resolves without needing next_step to be an installed package.
-from build_entity_merge_plan import ACTIVE_DOCUMENT_STATUSES  # noqa: E402
+from build_entity_merge_plan import active_document_ids  # noqa: E402
+from pg_storage import (  # noqa: E402
+    PgConnectionParams,
+    load_doc_status_async,
+    snapshot_tables_async,
+    verify_fingerprints_unchanged,
+)
 
 TERMINAL_SUCCESS_STATUSES = {"applied", "skipped_already_applied"}
 DOC_STATUS_FILENAME = "kv_store_doc_status.json"
@@ -79,6 +85,28 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("artifacts/entity_merge/workstation"),
         help="Directory containing merge_plan.jsonl and manifest.json.",
+    )
+    parser.add_argument(
+        "--storage-backend",
+        choices=("json", "pg"),
+        default="json",
+        help=(
+            "Must match the backend the plan's manifest.json was built with "
+            "(manifest['backend']) -- this script refuses to proceed on a "
+            "mismatch. json: safety checks (ingestion-active, snapshot drift) "
+            "read kv_store_doc_status.json from --working-dir. pg: the same "
+            "checks read Postgres via POSTGRES_* env vars. Either way, the "
+            "actual merge always goes through LightRAG(working_dir=...), "
+            "which already uses whatever storage backend --working-dir's "
+            ".env / the current environment configures -- this flag only "
+            "changes how the safety checks read data, not what gets mutated."
+        ),
+    )
+    parser.add_argument(
+        "--pg-workspace",
+        type=str,
+        default=None,
+        help="Overrides the WORKSPACE env var when --storage-backend pg is used.",
     )
     parser.add_argument(
         "--working-dir",
@@ -156,16 +184,34 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_snapshot(manifest_path: Path) -> str:
-    """Verify every manifest input file is unchanged; return a snapshot id.
+def load_manifest(manifest_path: Path) -> dict[str, Any]:
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
+def require_matching_backend(manifest: dict[str, Any], args: argparse.Namespace) -> None:
+    manifest_backend = manifest.get("backend", "json")
+    if manifest_backend != args.storage_backend:
+        raise SystemExit(
+            f"Refusing to apply: plan manifest was built with "
+            f"backend={manifest_backend!r} but --storage-backend={args.storage_backend!r}. "
+            "Pass the matching --storage-backend."
+        )
+
+
+async def verify_snapshot(manifest: dict[str, Any], args: argparse.Namespace) -> str:
+    """Verify every manifest input file (and, in pg mode, the Postgres
+    tables the plan was built from) is unchanged; return a snapshot id.
 
     The snapshot id is derived (not a field the current manifest.json stores)
     so every journal row can record which exact plan snapshot it was applied
     under, in case the plan is later regenerated from a different graph state.
     """
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     mismatches: list[str] = []
     hash_parts: list[str] = []
+    # umls_evaluation / sapbert_candidates are always real local files
+    # regardless of backend; doc-derived storage files only appear here in
+    # json-backend manifests (pg-backend manifests are verified separately
+    # below via pg_fingerprint_after).
     for entry in manifest.get("input_files", []):
         path = Path(entry["path"])
         hash_parts.append(f"{entry['path']}:{entry['sha256']}")
@@ -181,6 +227,14 @@ def verify_snapshot(manifest_path: Path) -> str:
         actual_hash = sha256_of(path)
         if actual_hash != entry["sha256"]:
             mismatches.append(f"{path} content changed (sha256 mismatch)")
+
+    if manifest.get("backend") == "pg":
+        params = pg_params_for_manifest(manifest, args)
+        recorded = {"tables": manifest.get("pg_fingerprint_after", {})}
+        current = await snapshot_tables_async(params)
+        mismatches.extend(verify_fingerprints_unchanged(recorded, current))
+        hash_parts.append(f"pg:{params.identity()}:{manifest.get('pg_fingerprint_after')}")
+
     if mismatches:
         joined = "\n  - ".join(mismatches)
         raise SystemExit(
@@ -191,27 +245,73 @@ def verify_snapshot(manifest_path: Path) -> str:
     return hashlib.sha256("\n".join(sorted(hash_parts)).encode("utf-8")).hexdigest()[:16]
 
 
-def original_storage_dir(manifest_path: Path) -> Path | None:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+def pg_params_for_manifest(
+    manifest: dict[str, Any], args: argparse.Namespace
+) -> PgConnectionParams:
+    """Build connection params for the database *recorded in the manifest*
+    (host/port/database/workspace), with credentials from the current
+    environment (never stored in the manifest). Used to verify the plan's
+    source hasn't drifted -- distinct from the *ambient* connection
+    LightRAG(working_dir=...) will actually mutate, checked separately by
+    same_source_as_plan().
+    """
+    connection = manifest.get("pg_connection", {})
+    env_params = PgConnectionParams.from_env(workspace=args.pg_workspace)
+    return PgConnectionParams(
+        host=connection.get("host", env_params.host),
+        port=connection.get("port", env_params.port),
+        user=env_params.user,
+        password=env_params.password,
+        database=connection.get("database", env_params.database),
+        workspace=connection.get("workspace", env_params.workspace),
+    )
+
+
+def same_source_as_plan(manifest: dict[str, Any], args: argparse.Namespace) -> bool:
+    """True when the target this run will mutate is the same source the plan
+    was built from -- the pg analog of the json-mode --working-dir identity
+    check. In pg mode there is no "working dir" for the data itself: the
+    actual mutation target is whatever POSTGRES_* env vars / workspace the
+    ambient environment resolves to when LightRAG(working_dir=...) connects,
+    so that's what must be compared against the plan's recorded source.
+    """
+    if manifest.get("backend") != "pg":
+        return False
+    recorded = manifest.get("pg_connection", {})
+    ambient = PgConnectionParams.from_env(workspace=args.pg_workspace)
+    return (
+        recorded.get("host") == ambient.host
+        and recorded.get("port") == ambient.port
+        and recorded.get("database") == ambient.database
+        and recorded.get("workspace") == ambient.workspace
+    )
+
+
+def original_storage_dir(manifest: dict[str, Any]) -> Path | None:
     input_files = manifest.get("input_files", [])
     if not input_files:
         return None
     return Path(input_files[0]["path"]).parent
 
 
-def refuse_if_ingestion_active(working_dir: Path) -> None:
-    doc_status_path = working_dir / DOC_STATUS_FILENAME
-    if not doc_status_path.exists():
-        return
-    doc_status = json.loads(doc_status_path.read_text(encoding="utf-8"))
-    active = sorted(
-        doc_id
-        for doc_id, record in doc_status.items()
-        if str(record.get("status", "")).casefold() in ACTIVE_DOCUMENT_STATUSES
-    )
+async def refuse_if_ingestion_active(
+    manifest: dict[str, Any], working_dir: Path, args: argparse.Namespace
+) -> None:
+    if manifest.get("backend") == "pg":
+        params = PgConnectionParams.from_env(workspace=args.pg_workspace)
+        doc_status = await load_doc_status_async(params)
+        active = active_document_ids(doc_status)
+        location = params.describe()
+    else:
+        doc_status_path = working_dir / DOC_STATUS_FILENAME
+        if not doc_status_path.exists():
+            return
+        doc_status = json.loads(doc_status_path.read_text(encoding="utf-8"))
+        active = active_document_ids(doc_status)
+        location = str(doc_status_path)
     if active:
         raise SystemExit(
-            f"Refusing to apply: {len(active)} document(s) in {doc_status_path} "
+            f"Refusing to apply: {len(active)} document(s) in {location} "
             f"are still mid-ingestion (e.g. {active[0]}). Wait for ingestion to "
             "finish, or confirm this working-dir is the intended target."
         )
@@ -309,6 +409,44 @@ def build_lightrag_embedding_func():
         sys.argv = saved_argv
 
 
+def build_lightrag_storage_kwargs() -> dict[str, Any]:
+    """Read LIGHTRAG_*_STORAGE / COSINE_THRESHOLD from .env, matching the server.
+
+    LightRAG's own dataclass fields default to hardcoded JSON/file storage
+    class names (kv_storage="JsonKVStorage", etc. -- see lightrag/lightrag.py)
+    and never self-configure from LIGHTRAG_KV_STORAGE / LIGHTRAG_VECTOR_STORAGE
+    / LIGHTRAG_GRAPH_STORAGE / LIGHTRAG_DOC_STATUS_STORAGE. Only the server
+    (lightrag/api/config.py's global_args) reads those env vars and passes
+    them as explicit constructor kwargs. Without this, LightRAG(working_dir=...)
+    silently mutates a fresh empty JSON/file workspace instead of the real
+    backend --storage-backend/POSTGRES_* configured, regardless of those
+    flags -- every component then fails with rejected_precondition because
+    the canonical/alias entities "don't exist" in the empty workspace it
+    actually opened.
+
+    global_args' first access lazily parses sys.argv, which would collide
+    with this script's own argparse flags -- same sys.argv swap as
+    build_lightrag_embedding_func(). Safe to call either function first;
+    global_args caches after its first resolution.
+    """
+    saved_argv = sys.argv
+    try:
+        sys.argv = [saved_argv[0] if saved_argv else "apply_entity_merge_plan.py"]
+        from lightrag.api.config import global_args
+
+        return {
+            "kv_storage": global_args.kv_storage,
+            "vector_storage": global_args.vector_storage,
+            "graph_storage": global_args.graph_storage,
+            "doc_status_storage": global_args.doc_status_storage,
+            "vector_db_storage_cls_kwargs": {
+                "cosine_better_than_threshold": global_args.cosine_threshold
+            },
+        }
+    finally:
+        sys.argv = saved_argv
+
+
 async def _unused_llm_model_func(*_args: Any, **_kwargs: Any) -> str:
     raise RuntimeError(
         "apply_entity_merge_plan.py never calls the LLM; this stub firing "
@@ -333,18 +471,33 @@ async def run(args: argparse.Namespace) -> int:
         raise SystemExit(f"Manifest not found: {manifest_path}")
 
     working_dir = args.working_dir.resolve()
-    original_dir = original_storage_dir(manifest_path)
-    if original_dir is not None and working_dir == original_dir.resolve():
-        if not args.allow_original_workspace:
-            raise SystemExit(
-                f"Refusing to apply: --working-dir ({working_dir}) is the same "
-                f"directory the plan was built from ({original_dir}). Apply to "
-                "an isolated copy instead, or pass --allow-original-workspace "
-                "if you have deliberately decided to mutate the live workspace."
-            )
+    manifest = load_manifest(manifest_path)
+    require_matching_backend(manifest, args)
 
-    snapshot_id = verify_snapshot(manifest_path)
-    refuse_if_ingestion_active(working_dir)
+    if manifest.get("backend") == "pg":
+        if same_source_as_plan(manifest, args) and not args.allow_original_workspace:
+            recorded = manifest.get("pg_connection", {})
+            raise SystemExit(
+                "Refusing to apply: the ambient POSTGRES_* environment / "
+                f"--pg-workspace resolves to the same database the plan was "
+                f"built from ({recorded}). Point this run at an isolated copy "
+                "(e.g. a pg_dump/restore into a separate database or "
+                "workspace) instead, or pass --allow-original-workspace if "
+                "you have deliberately decided to mutate the live workspace."
+            )
+    else:
+        original_dir = original_storage_dir(manifest)
+        if original_dir is not None and working_dir == original_dir.resolve():
+            if not args.allow_original_workspace:
+                raise SystemExit(
+                    f"Refusing to apply: --working-dir ({working_dir}) is the same "
+                    f"directory the plan was built from ({original_dir}). Apply to "
+                    "an isolated copy instead, or pass --allow-original-workspace "
+                    "if you have deliberately decided to mutate the live workspace."
+                )
+
+    snapshot_id = await verify_snapshot(manifest, args)
+    await refuse_if_ingestion_active(manifest, working_dir, args)
 
     components = load_components(plan_path)
     if allowed_ids is not None:
@@ -391,10 +544,17 @@ async def run(args: argparse.Namespace) -> int:
     from lightrag.utils import VectorStorageConsistencyError
 
     embedding_func = build_lightrag_embedding_func()
+    storage_kwargs = build_lightrag_storage_kwargs()
+    print(
+        "Storage backend for this apply: "
+        f"kv={storage_kwargs['kv_storage']} vector={storage_kwargs['vector_storage']} "
+        f"graph={storage_kwargs['graph_storage']} doc_status={storage_kwargs['doc_status_storage']}"
+    )
     rag = LightRAG(
         working_dir=str(working_dir),
         embedding_func=embedding_func,
         llm_model_func=_unused_llm_model_func,
+        **storage_kwargs,
     )
     await rag.initialize_storages()
 

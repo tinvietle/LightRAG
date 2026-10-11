@@ -10,6 +10,12 @@ from pathlib import Path
 import re
 from typing import Any, Iterable
 
+# pg_storage.py lives next to this file; running as `python
+# next_step/analyze_entity_merge_provenance.py` puts next_step/ on
+# sys.path[0], matching the existing build_entity_merge_plan.py import
+# convention (see apply_entity_merge_plan.py's comment on the same pattern).
+from pg_storage import PgConnectionParams, load_workspace  # noqa: E402
+
 
 DISEASE_FIELD_RE = re.compile(
     r'"(?P<field>grouped_disease_name|extracted_disease_name)"\s*:\s*'
@@ -64,6 +70,23 @@ class DocumentLabel:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--storage-backend",
+        choices=("json", "pg"),
+        default="json",
+        help=(
+            "json: read kv_store_*.json from --storage (default, unchanged "
+            "behavior). pg: read the same data from Postgres via POSTGRES_* "
+            "env vars (see pg_storage.PgConnectionParams.from_env); "
+            "--storage is ignored in this mode."
+        ),
+    )
+    parser.add_argument(
+        "--pg-workspace",
+        type=str,
+        default=None,
+        help="Overrides the WORKSPACE env var when --storage-backend pg is used.",
+    )
     parser.add_argument("--storage", type=Path, default=Path("data/rag_storage"))
     parser.add_argument(
         "--umls-evaluation",
@@ -185,8 +208,16 @@ def count_distribution(values: Iterable[int]) -> dict[str, int]:
 
 def main() -> int:
     args = parse_args()
-    full_docs = read_json(args.storage / "kv_store_full_docs.json")
-    entity_chunks = read_json(args.storage / "kv_store_entity_chunks.json")
+    if args.storage_backend == "pg":
+        params = PgConnectionParams.from_env(workspace=args.pg_workspace)
+        data = load_workspace(params, want={"full_docs", "entity_chunks"})
+        full_docs = data.full_docs
+        entity_chunks = data.entity_chunks
+        storage_label = params.describe()
+    else:
+        full_docs = read_json(args.storage / "kv_store_full_docs.json")
+        entity_chunks = read_json(args.storage / "kv_store_entity_chunks.json")
+        storage_label = str(args.storage)
     document_labels = {
         doc_id: extract_document_label(record) for doc_id, record in full_docs.items()
     }
@@ -336,7 +367,7 @@ def main() -> int:
     component_count = len(details)
     summary = {
         "configuration": {
-            "storage": str(args.storage),
+            "storage": storage_label,
             "sapbert_threshold": args.threshold,
             "policy": "QuickUMLS safe unique-CUI groups plus SapBERT lexical-equivalent pairs without modifier conflicts",
         },

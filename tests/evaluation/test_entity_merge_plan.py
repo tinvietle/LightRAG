@@ -10,7 +10,11 @@ import pytest
 
 
 SCRIPT = Path(__file__).parents[2] / "next_step/build_entity_merge_plan.py"
-SPEC = importlib.util.spec_from_file_location("build_entity_merge_plan", SCRIPT)
+# Run as a script, next_step/ is sys.path[0] and the script's sibling imports
+# (pg_storage) resolve; loading it by file path needs the same.
+if str(SCRIPT.parent) not in sys.path:
+    sys.path.insert(0, str(SCRIPT.parent))
+SPEC =importlib.util.spec_from_file_location("build_entity_merge_plan", SCRIPT)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
@@ -48,6 +52,8 @@ def analysis_args(
     storage: Path, umls: Path, sapbert: Path, output_dir: Path
 ) -> argparse.Namespace:
     return argparse.Namespace(
+        storage_backend="json",
+        pg_workspace=None,
         storage=storage,
         umls_evaluation=umls,
         sapbert_candidates=sapbert,
