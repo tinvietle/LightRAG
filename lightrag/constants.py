@@ -250,6 +250,9 @@ DEFAULT_QUEUE_SIZE_INSERT = 4
 # Query stage (interactive: query/keyword LLM calls and query-time embeddings)
 # gets the highest priority so user requests stay responsive.
 DEFAULT_QUERY_PRIORITY = 5
+
+# Name of the built-in query keyword-extraction prompt in lightrag.prompt.PROMPTS
+DEFAULT_KEYWORDS_EXTRACTION_PROMPT = "keywords_extraction"
 # Entity/relation description summary generation — ahead of raw extraction but
 # behind interactive query work.
 DEFAULT_SUMMARY_PRIORITY = 8

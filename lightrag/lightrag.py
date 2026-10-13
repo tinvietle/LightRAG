@@ -64,6 +64,7 @@ from lightrag.constants import (
     DEFAULT_SUMMARY_LANGUAGE,
     DEFAULT_LLM_TIMEOUT,
     DEFAULT_EMBEDDING_TIMEOUT,
+    DEFAULT_KEYWORDS_EXTRACTION_PROMPT,
     DEFAULT_RERANK_TIMEOUT,
     DEFAULT_SOURCE_IDS_LIMIT_METHOD,
     DEFAULT_MAX_FILE_PATHS,
@@ -447,6 +448,16 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
     )
     """Cap on how many deduplicated GLiNER/QuickUMLS suggestions can be
     appended to ll_keywords per query."""
+
+    keywords_extraction_prompt: str = field(
+        default_factory=lambda: get_env_value(
+            "KEYWORDS_EXTRACTION_PROMPT", DEFAULT_KEYWORDS_EXTRACTION_PROMPT, str
+        )
+    )
+    """Name of the query keyword-extraction prompt in ``PROMPTS``. The matching
+    examples are read from ``PROMPTS["<name>_examples"]``. Built-in choices:
+    ``keywords_extraction`` (default, question-oriented) and
+    ``keywords_extraction_case`` (patient-case oriented)."""
 
     force_llm_summary_on_merge: int = field(
         default=get_env_value(

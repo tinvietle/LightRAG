@@ -136,6 +136,19 @@ class QueryParam:
     ll_keywords: list[str] = field(default_factory=list)
     """List of low-level keywords to refine retrieval focus."""
 
+    ignore_hl_keywords: bool = (
+        os.getenv("IGNORE_HL_KEYWORDS", "false").lower() == "true"
+    )
+    """If True, high-level keywords are discarded and the relation search is skipped.
+    Applies to LLM-extracted and caller-supplied keywords alike; chunk vector search
+    on the raw query is unaffected."""
+
+    ignore_ll_keywords: bool = (
+        os.getenv("IGNORE_LL_KEYWORDS", "false").lower() == "true"
+    )
+    """If True, low-level keywords (including query NER hints) are discarded and the
+    entity search is skipped. Chunk vector search on the raw query is unaffected."""
+
     # History mesages is only send to LLM for context, not used for retrieval
     conversation_history: list[dict[str, str]] = field(default_factory=list)
     """Stores past conversation history to maintain context.

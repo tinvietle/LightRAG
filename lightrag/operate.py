@@ -82,6 +82,7 @@ from lightrag.constants import (
     DEFAULT_MAX_SECTION_CONTEXT_TOKENS,
     DEFAULT_MAX_RELATION_TOKENS,
     DEFAULT_MAX_TOTAL_TOKENS,
+    DEFAULT_KEYWORDS_EXTRACTION_PROMPT,
     DEFAULT_QUERY_PRIORITY,
     DEFAULT_SUMMARY_PRIORITY,
     DEFAULT_RELATED_CHUNK_NUMBER,
@@ -3974,12 +3975,25 @@ async def kg_query(
     logger.debug(f"High-level keywords: {hl_keywords}")
     logger.debug(f"Low-level  keywords: {ll_keywords}")
 
-    # Handle empty keywords
-    if ll_keywords == [] and query_param.mode in ["local", "hybrid", "mix"]:
+    # Handle empty keywords (an intentionally ignored kind is not a warning)
+    if (
+        ll_keywords == []
+        and not query_param.ignore_ll_keywords
+        and query_param.mode in ["local", "hybrid", "mix"]
+    ):
         logger.warning("low_level_keywords is empty")
-    if hl_keywords == [] and query_param.mode in ["global", "hybrid", "mix"]:
+    if (
+        hl_keywords == []
+        and not query_param.ignore_hl_keywords
+        and query_param.mode in ["global", "hybrid", "mix"]
+    ):
         logger.warning("high_level_keywords is empty")
-    if hl_keywords == [] and ll_keywords == []:
+    keywords_ignored = query_param.ignore_hl_keywords or query_param.ignore_ll_keywords
+    if hl_keywords == [] and ll_keywords == [] and keywords_ignored:
+        # Empty by request: mix/naive retrieval still has the raw-query chunk
+        # vector search, so continue instead of forcing keywords or failing.
+        logger.info("No keywords used (ignored by request); retrieving on the raw query")
+    elif hl_keywords == [] and ll_keywords == []:
         if len(query_for_pipeline) < 50:
             logger.warning(
                 "Forced low_level_keywords to query text: %s", query_for_pipeline
@@ -4184,35 +4198,51 @@ async def get_keywords_from_query(
     Returns:
         A tuple containing (high_level_keywords, low_level_keywords)
     """
+    ignore_hl = query_param.ignore_hl_keywords
+    ignore_ll = query_param.ignore_ll_keywords
+
+    # Nothing to extract when both kinds are ignored: skip the LLM call entirely.
+    if ignore_hl and ignore_ll:
+        logger.info("Ignoring both high-level and low-level keywords")
+        return [], []
+
     # Check if pre-defined keywords are already provided. Keywords supplied
     # explicitly by the caller are left untouched by NER augmentation.
     if query_param.hl_keywords or query_param.ll_keywords:
-        return query_param.hl_keywords, query_param.ll_keywords
-
-    # Extract keywords directly from the current query text.
-    hl_keywords, ll_keywords = await extract_keywords_only(
-        query, query_param, global_config, hashing_kv
-    )
-
-    # Optionally augment with GLiNER/QuickUMLS hints detected in the query
-    # itself. No-op (returns []) unless enable_query_ner_hints is True.
-    if global_config.get("enable_query_ner_hints", False):
-        ner_suggestions = await _get_query_ner_suggestions(query, global_config)
-        ll_keywords = list(ll_keywords) if ll_keywords else []
-        seen = {keyword.strip().casefold() for keyword in ll_keywords}
-        added = []
-        for suggestion in ner_suggestions:
-            key = suggestion.casefold()
-            if key and key not in seen:
-                ll_keywords.append(suggestion)
-                seen.add(key)
-                added.append(suggestion)
-        # INFO (not debug) so this is visible with default server logging,
-        # letting you confirm the toggle is actually taking effect.
-        logger.info(
-            f"Query NER hints: detected {len(ner_suggestions)} candidate(s), "
-            f"added {len(added)} new low-level keyword(s): {added}"
+        hl_keywords, ll_keywords = query_param.hl_keywords, query_param.ll_keywords
+    else:
+        # Extract keywords directly from the current query text.
+        hl_keywords, ll_keywords = await extract_keywords_only(
+            query, query_param, global_config, hashing_kv
         )
+
+        # Optionally augment with GLiNER/QuickUMLS hints detected in the query
+        # itself. No-op (returns []) unless enable_query_ner_hints is True. The
+        # hints are low-level keywords, so they are pointless when those are ignored.
+        if global_config.get("enable_query_ner_hints", False) and not ignore_ll:
+            ner_suggestions = await _get_query_ner_suggestions(query, global_config)
+            ll_keywords = list(ll_keywords) if ll_keywords else []
+            seen = {keyword.strip().casefold() for keyword in ll_keywords}
+            added = []
+            for suggestion in ner_suggestions:
+                key = suggestion.casefold()
+                if key and key not in seen:
+                    ll_keywords.append(suggestion)
+                    seen.add(key)
+                    added.append(suggestion)
+            # INFO (not debug) so this is visible with default server logging,
+            # letting you confirm the toggle is actually taking effect.
+            logger.info(
+                f"Query NER hints: detected {len(ner_suggestions)} candidate(s), "
+                f"added {len(added)} new low-level keyword(s): {added}"
+            )
+
+    if ignore_hl:
+        logger.info("Ignoring high-level keywords (relation search is skipped)")
+        hl_keywords = []
+    if ignore_ll:
+        logger.info("Ignoring low-level keywords (entity search is skipped)")
+        ll_keywords = []
 
     return hl_keywords, ll_keywords
 
@@ -4469,8 +4499,20 @@ async def extract_keywords_only(
     It ONLY extracts keywords (hl_keywords, ll_keywords).
     """
 
-    # 1. Build the examples
-    examples = "\n".join(PROMPTS["keywords_extraction_examples"])
+    # 1. Pick the prompt variant and build its examples
+    prompt_name = (
+        global_config.get("keywords_extraction_prompt") or DEFAULT_KEYWORDS_EXTRACTION_PROMPT
+    )
+    if prompt_name not in PROMPTS or f"{prompt_name}_examples" not in PROMPTS:
+        available = sorted(
+            key[: -len("_examples")]
+            for key in PROMPTS
+            if key.startswith("keywords_extraction") and key.endswith("_examples")
+        )
+        raise ValueError(
+            f"Unknown keywords_extraction_prompt {prompt_name!r}; available: {available}"
+        )
+    examples = "\n".join(PROMPTS[f"{prompt_name}_examples"])
 
     addon_params = global_config.get("addon_params") or {}
     language = global_config.get("_resolved_summary_language")
@@ -4479,13 +4521,18 @@ async def extract_keywords_only(
 
     # 2. Handle cache if needed - add cache type for keywords
     llm_cache_identity = get_llm_cache_identity(global_config, "keyword")
-    args_hash = compute_args_hash(
+    hash_parts: list[str] = [
         param.mode,
         text,
         language,
         "\n<llm_identity>\n",
         serialize_llm_cache_identity(llm_cache_identity),
-    )
+    ]
+    if prompt_name != DEFAULT_KEYWORDS_EXTRACTION_PROMPT:
+        # Keep default-prompt cache keys unchanged; a different prompt must not
+        # reuse keywords cached under another one.
+        hash_parts += ["\n<keywords_prompt>\n", prompt_name]
+    args_hash = compute_args_hash(*hash_parts)
     cached_result = await handle_cache(
         hashing_kv, args_hash, text, param.mode, cache_type="keywords"
     )
@@ -4502,7 +4549,7 @@ async def extract_keywords_only(
             )
 
     # 3. Build the keyword-extraction prompt
-    kw_prompt = PROMPTS["keywords_extraction"].format(
+    kw_prompt = PROMPTS[prompt_name].format(
         query=text,
         examples=examples,
         language=language,

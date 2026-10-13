@@ -94,6 +94,16 @@ class QueryRequest(BaseModel):
         description="List of low-level keywords to refine retrieval focus. Leave empty to use the LLM to generate the keywords.",
     )
 
+    ignore_hl_keywords: Optional[bool] = Field(
+        default=None,
+        description="If True, discard high-level keywords and skip the relation search. Defaults to the IGNORE_HL_KEYWORDS environment setting.",
+    )
+
+    ignore_ll_keywords: Optional[bool] = Field(
+        default=None,
+        description="If True, discard low-level keywords (including query NER hints) and skip the entity search. Defaults to the IGNORE_LL_KEYWORDS environment setting.",
+    )
+
     conversation_history: Optional[List[Dict[str, Any]]] = Field(
         default=None,
         description="History messages are only sent to LLM for context, not used for retrieval. Format: [{'role': 'user/assistant', 'content': 'message'}].",

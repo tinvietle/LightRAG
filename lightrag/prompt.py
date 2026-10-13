@@ -619,6 +619,73 @@ Output:
 """,
 ]
 
+# Case-oriented variant of the keyword prompt, for diagnosis prediction from a
+# patient case record (the query is a full case, not a one-line question).
+# It is selected with KEYWORDS_EXTRACTION_PROMPT=keywords_extraction_case and
+# leaves the default `keywords_extraction` prompt above untouched. The default
+# stays in place so the two can be compared directly.
+#
+# Design notes:
+# - low-level keywords are entity-style names (candidate diagnoses first, then
+#   discriminating findings) because entities are embedded as "name + description".
+# - high-level keywords are optional and kept minimal: relation vocabulary verbs
+#   (characterized_by, associated_with, ...) occur in nearly every stored relation
+#   and carry no disease signal, so they are not requested. A finding + candidate
+#   disease pair can still match relation records, which mention both.
+PROMPTS["keywords_extraction_case"] = """---Role---
+You write retrieval queries for a case-based diagnostic RAG system. The User Query is a patient case record. Your keywords are matched against a knowledge base of previously documented cases, stored as entities (a name plus a description) and relations between entities.
+
+---Goal---
+Return two lists:
+1. **low_level_keywords** (up to 10, most diagnostic first):
+   - First 3-5 candidate diagnoses that span the plausible differential. Use standard disease names, and include at least one less obvious alternative, not only the most likely diagnosis.
+   - Then the most discriminating findings from the case: causative organism, characteristic imaging, laboratory or pathology pattern, specific exposure, pathognomonic sign. Keep the case's own wording for findings.
+2. **high_level_keywords** (0-3): each one pairs a key finding with a candidate diagnosis in a short phrase, for example "<key finding> <candidate disease>". Return an empty array when you are not confident of a pairing.
+
+---Instructions & Constraints---
+1. **Output Format**: Return a valid JSON object and nothing else. Do not include explanatory text, Markdown fences, comments, or text before or after the JSON.
+2. **Exact JSON Shape**: The object must contain exactly `"high_level_keywords"` and `"low_level_keywords"`, both arrays of strings. Its first character must be `{{` and its last character must be `}}`.
+3. **Source of Truth**: Findings must come from the `User Query` in `---Real Data---`; never invent findings. Diagnoses may be inferred from the findings, but only plausible ones.
+4. **Prefer Discriminating over Common**: Skip demographics, vital signs, nonspecific laboratory results, exact numeric values, and generic drugs or procedures. Treatments and outcomes are weak evidence; keep one only when it implies a diagnosis.
+5. **Short and Canonical**: Use short names, not sentences. Do not repeat keywords. Do not use task words such as diagnosis, differential, workup, evaluation, or management as keywords.
+6. **Language**: All keywords MUST be in {language}. Retain internationally accepted medical terminology when translation would reduce clinical accuracy.
+7. **Edge Cases**: For simple, vague, or nonsensical queries (e.g., "hello", "ok", "asdfghjkl"), return `{{"high_level_keywords": [], "low_level_keywords": []}}`.
+8. **Template Safety**: The `---Output Format Template---` contains examples only, never source text. Do not extract, infer, or copy keywords from it.
+
+---Output Format Template---
+The following content is an output JSON format template only. It is not source text and must never be used as keyword extraction content.
+
+{examples}
+
+---Real Data---
+User Query: {query}
+
+---Output---
+Output:"""
+
+PROMPTS["keywords_extraction_case_examples"] = [
+    """Example 1:
+
+Query: "Demographics: 27-year-old female. Chief complaint: severe colicky abdominal pain for three days with vomiting and constipation. History: similar milder episodes before menses; started a low-calorie diet last week. Exam: tachycardia, mild confusion, diffuse abdominal tenderness without peritonism, proximal leg weakness. Labs: hyponatremia; urine darkened to reddish-brown after standing in light; urine porphobilinogen markedly elevated. Imaging: abdominal CT without obstruction."
+
+Output:
+{
+  "high_level_keywords": ["elevated porphobilinogen acute intermittent porphyria", "dark urine on standing porphyria"],
+  "low_level_keywords": ["Acute intermittent porphyria", "Variegate porphyria", "Lead poisoning", "Acute appendicitis", "Elevated urine porphobilinogen", "Urine darkening on standing in light", "Colicky abdominal pain without peritonism", "Hyponatremia", "Proximal muscle weakness", "Low-calorie diet"]
+}
+""",
+    """Example 2:
+
+Query: "Demographics: 16-year-old male. Chief complaint: hand tremor and slurred speech for two months, declining school performance. Exam: dysarthria, rigidity, wing-beating tremor; greenish-brown ring at the corneal periphery on slit-lamp examination. Labs: low serum ceruloplasmin, elevated 24-hour urinary copper, mildly raised transaminases. Imaging: MRI brain with bilateral basal ganglia hyperintensity."
+
+Output:
+{
+  "high_level_keywords": ["Kayser-Fleischer ring low ceruloplasmin Wilson disease"],
+  "low_level_keywords": ["Wilson disease", "Juvenile Parkinsonism", "Autoimmune hepatitis", "Huntington disease", "Kayser-Fleischer ring", "Low serum ceruloplasmin", "Elevated 24-hour urinary copper", "Wing-beating tremor", "Basal ganglia hyperintensity on MRI", "Dysarthria with rigidity"]
+}
+""",
+]
+
 
 class EntityExtractionPromptProfile(TypedDict):
     entity_types_guidance: str

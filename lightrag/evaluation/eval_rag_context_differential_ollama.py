@@ -171,6 +171,8 @@ class RAGContextCollector:
         self.max_async = int(os.getenv("EVAL_MAX_CONCURRENT", "2"))
         self.query_mode = os.getenv("EVAL_QUERY_MODE", "mix")
         self.enable_rerank = _optional_bool("EVAL_ENABLE_RERANK")
+        # /query/data returns the same retrieval evidence without the answer step.
+        self.retrieval_only = bool(_optional_bool("EVAL_RETRIEVAL_ONLY"))
         self.max_entity_tokens = _optional_int("EVAL_MAX_ENTITY_TOKENS")
         self.max_relation_tokens = _optional_int("EVAL_MAX_RELATION_TOKENS")
         self.max_total_tokens = _optional_int("EVAL_MAX_TOTAL_TOKENS")
@@ -309,7 +311,7 @@ class RAGContextCollector:
         headers = {"X-API-Key": self.api_key} if self.api_key else None
         try:
             response = await client.post(
-                f"{self.rag_api_url}/query/full",
+                f"{self.rag_api_url}/query/{'data' if self.retrieval_only else 'full'}",
                 json=payload,
                 headers=headers,
             )
